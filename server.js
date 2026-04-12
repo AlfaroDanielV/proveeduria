@@ -35,6 +35,10 @@ REGLAS:
 - Montos siempre en colones (₡) a menos que el usuario diga otra moneda.
 - Para registrar un movimiento SIEMPRE necesitás: proyecto, material, cantidad, unidad. Precio y proveedor son opcionales pero intentá obtenerlos.
 - Si el usuario no especifica el proyecto, preguntale o mostrá la lista de proyectos activos.
+- Si el usuario reporta un error (ej: "Error: me cobró doble", "eso está mal", "te equivocaste"), registrá la retroalimentación con registrar_retroalimentacion, guardá los detalles, agradecé, y decile que Daniel lo va a revisar.
+- Si el usuario hace una sugerencia ("sería bueno que...", "deberían agregar..."), también registrala como tipo 'sugerencia'.
+- Este chat es EXCLUSIVAMENTE para temas de proveeduría y gestión de proyectos de la empresa. Si alguien te pregunta cosas personales, te pide ayuda con tareas, recetas, chistes, traducciones, o cualquier cosa que no tenga que ver con el trabajo, respondé amablemente que solo podés ayudar con temas de proveeduría. Ejemplo: "Mae, con gusto te ayudaría pero este canal es solo para el registro de compras y materiales de los proyectos. ¿Ocupás registrar algo? 📋"
+- No sos un asistente general. No respondás preguntas de cultura general, no hagás cálculos que no sean de materiales o costos de proyectos, y no des consejos sobre temas ajenos al negocio.
 
 TONO Y ACCOUNTABILITY:
 - Sos amigable pero no permisivo. Si detectás patrones de irresponsabilidad (compras sin factura repetidas, registros incompletos a propósito, datos que no cuadran, o incumplimiento de procesos), subís el tono.
@@ -133,6 +137,25 @@ const TOOLS = [
         },
       },
       required: [],
+    },
+  },
+  {
+    name: 'registrar_retroalimentacion',
+    description: 'Registra retroalimentación del usuario sobre errores o sugerencias. Usala cuando el usuario reporte un error (mensajes que empiezan con "Error:" o similares) o haga una sugerencia sobre el sistema.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        detalle: {
+          type: 'string',
+          description: 'Descripción del error o sugerencia reportada por el usuario.',
+        },
+        tipo: {
+          type: 'string',
+          enum: ['error', 'sugerencia', 'otro'],
+          description: 'Tipo de retroalimentación.',
+        },
+      },
+      required: ['detalle', 'tipo'],
     },
   },
   {
@@ -481,6 +504,32 @@ async function handleTool(toolName, input, phoneNumber) {
           total_movimientos: p.total_movimientos,
           ultima_compra: p.ultima_compra,
         })),
+      });
+    }
+    case 'registrar_retroalimentacion': {
+      // Capturar últimos mensajes como contexto
+      const conversacion = getConversation(phoneNumber);
+      const contexto = conversacion.slice(-6);
+
+      const { data, error } = await supabase
+        .from('retroalimentacion')
+        .insert({
+          reportado_por: userId,
+          reportado_telefono: phoneNumber,
+          tipo: input.tipo,
+          detalle: input.detalle,
+          contexto_conversacion: contexto,
+        })
+        .select()
+        .single();
+
+      if (error) throw new Error(`Error registrando retroalimentación: ${error.message}`);
+
+      return JSON.stringify({
+        success: true,
+        id: data.id,
+        tipo: input.tipo,
+        detalle: input.detalle,
       });
     }
 
