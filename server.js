@@ -1,4 +1,5 @@
 const http = require('http');
+const crypto = require('crypto');
 const Anthropic = require('@anthropic-ai/sdk');
 const { createClient } = require('@supabase/supabase-js');
 
@@ -53,10 +54,18 @@ FLUJO DE FACTURA:
 2. Mostrás los datos extraídos y pedís confirmación
 3. Usuario confirma → usás confirmar_factura para registrar los movimientos
 
+CONTRATISTAS:
+- Los contratistas son personas o empresas contratadas para un proyecto (electricistas, albañiles, pintores, etc.).
+- Flujo: 1) registrar_contratista (catálogo maestro) → 2) registrar_contrato (liga contratista a proyecto con monto_original) → 3a) registrar_pago_contratista por cada abono/cuota, o 3b) registrar_orden_cambio para ajustes (+/-) al monto.
+- consultar_contratistas te devuelve el resumen con monto_vigente, total_pagado, saldo_pendiente y porcentaje_pagado.
+- Antes de registrar un pago, mostrá al usuario el saldo_pendiente actual. Si el monto excede el saldo, pedí confirmación explícita (usá confirmar_sobregiro=true solo si el usuario lo aprueba).
+- Antes de registrar una orden de cambio, confirmá con el usuario el monto (con signo) y la descripción.
+- Si el servidor devuelve { error: 'permiso_denegado' }, decile al usuario con amabilidad que esa acción requiere permisos de admin y que hable con Daniel.
+
 FORMATO DE RESPUESTA:
 - Usá formato simple, sin markdown pesado (WhatsApp no lo renderiza bien).
 - Listas con guiones simples o números.
-- Montos con separador de miles: ₡1.500, ₡25.000
+- Montos con separador de miles: ₡1.500, ₡25.000, ₡1.250.000
 - Fechas en formato DD/MM/AAAA o "hoy", "ayer".
 - Por favor y gracias siempre que sea posible.`;
 
@@ -267,11 +276,150 @@ const TOOLS = [
       required: ['movimiento_id', 'campos'],
     },
   },
+  {
+    name: 'registrar_contratista',
+    description: 'Registra un nuevo contratista en el catálogo maestro. Solo admin/superadmin. Antes de insertar verifica duplicados por nombre (case-insensitive); si hay coincidencia, devuelve una advertencia y el usuario debe confirmar.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        nombre: { type: 'string', description: 'Nombre del contratista (persona o empresa).' },
+        especialidad: { type: 'string', description: 'Especialidad (electricista, albañilería, pintura, etc.). Opcional.' },
+        telefono: { type: 'string', description: 'Teléfono de contacto. Opcional.' },
+        notas: { type: 'string', description: 'Notas adicionales. Opcional.' },
+        confirmar_duplicado: {
+          type: 'boolean',
+          description: 'Poné true solo cuando el usuario YA confirmó que es un contratista distinto pese al nombre similar. Default: false.',
+        },
+      },
+      required: ['nombre'],
+    },
+  },
+  {
+    name: 'registrar_contrato',
+    description: 'Registra un contrato entre un contratista y un proyecto con un monto original. Solo admin/superadmin. Si no tenés el contratista_id o proyecto_id, usá consultar_contratistas o listar_proyectos primero.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        contratista_id: { type: 'string', description: 'UUID del contratista.' },
+        proyecto_id: { type: 'string', description: 'UUID del proyecto.' },
+        descripcion: { type: 'string', description: 'Descripción del trabajo contratado.' },
+        monto_original: { type: 'number', description: 'Monto original en colones.' },
+        fecha_inicio: { type: 'string', description: 'Fecha de inicio (YYYY-MM-DD). Opcional.' },
+        fecha_fin_estimada: { type: 'string', description: 'Fecha estimada de fin (YYYY-MM-DD). Opcional.' },
+        notas: { type: 'string', description: 'Notas adicionales. Opcional.' },
+      },
+      required: ['contratista_id', 'proyecto_id', 'monto_original'],
+    },
+  },
+  {
+    name: 'registrar_orden_cambio',
+    description: 'Registra un ajuste (positivo o negativo) al monto de un contrato existente. Solo admin/superadmin. SIEMPRE confirmá monto (con signo) y descripción con el usuario antes de llamar esta tool.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        contrato_id: { type: 'string', description: 'UUID del contrato.' },
+        descripcion: { type: 'string', description: 'Razón del ajuste (ej: "Trabajo adicional de pintura en exteriores").' },
+        monto: { type: 'number', description: 'Monto del ajuste en colones. Puede ser negativo.' },
+        fecha: { type: 'string', description: 'Fecha del ajuste (YYYY-MM-DD). Default: hoy.' },
+      },
+      required: ['contrato_id', 'descripcion', 'monto'],
+    },
+  },
+  {
+    name: 'registrar_pago_contratista',
+    description: 'Registra un pago/cuota a un contratista sobre un contrato. Admin, superadmin u operativo. Antes de llamar, consultá el saldo_pendiente con consultar_contratistas. Si el pago excede el saldo, el servidor devolverá una advertencia — pedí confirmación al usuario y reintentá con confirmar_sobregiro=true.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        contrato_id: { type: 'string', description: 'UUID del contrato.' },
+        monto: { type: 'number', description: 'Monto del pago en colones (positivo).' },
+        fecha_pago: { type: 'string', description: 'Fecha del pago (YYYY-MM-DD). Default: hoy.' },
+        numero_cuota: { type: 'number', description: 'Número de cuota si aplica. Opcional.' },
+        descripcion: { type: 'string', description: 'Descripción del pago. Opcional.' },
+        confirmar_sobregiro: {
+          type: 'boolean',
+          description: 'Poné true solo cuando el usuario YA confirmó que quiere pagar más que el saldo_pendiente. Default: false.',
+        },
+      },
+      required: ['contrato_id', 'monto'],
+    },
+  },
+  {
+    name: 'consultar_contratistas',
+    description: 'Consulta contratos y resúmenes financieros (monto vigente, pagado, saldo pendiente, % pagado). Accesible para todos los roles. Sin filtros devuelve todos los contratos activos.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        contratista_id: { type: 'string', description: 'Filtrar por UUID de contratista. Opcional.' },
+        proyecto_id: { type: 'string', description: 'Filtrar por UUID de proyecto. Opcional.' },
+        contrato_id: { type: 'string', description: 'Filtrar por UUID de contrato. Opcional.' },
+        estado: {
+          type: 'string',
+          enum: ['activo', 'finalizado', 'cancelado'],
+          description: 'Filtrar por estado. Si se omite, devuelve solo activos.',
+        },
+        incluir_pagos: {
+          type: 'boolean',
+          description: 'Si true, incluye el historial de pagos de cada contrato. Default: false.',
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'generar_link_dashboard',
+    description: 'Genera un enlace temporal al dashboard web de un proyecto. Solo admin/superadmin. Respondé al usuario con un mensaje corto y el link.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        proyecto_id: { type: 'string', description: 'UUID del proyecto.' },
+        horas_validez: {
+          type: 'number',
+          description: 'Horas que el link permanece activo. Default: 24. Máximo: 168.',
+        },
+      },
+      required: ['proyecto_id'],
+    },
+  },
 ];
 
 // ============================================================
 // TOOL HANDLERS
 // ============================================================
+
+// Roles requeridos por tool. Si la tool no aparece aquí, no hay restricción.
+const TOOL_ROLES = {
+  registrar_contratista: ['admin', 'superadmin'],
+  registrar_contrato: ['admin', 'superadmin'],
+  registrar_orden_cambio: ['admin', 'superadmin'],
+  registrar_pago_contratista: ['admin', 'superadmin', 'operativo'],
+  generar_link_dashboard: ['admin', 'superadmin'],
+};
+
+// ============================================================
+// DASHBOARD JWT (HS256, sin dependencias externas)
+// ============================================================
+
+function base64urlEncode(input) {
+  return Buffer.from(input)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+}
+
+function signDashboardToken(payload, secret, expiresInSeconds) {
+  const header = { alg: 'HS256', typ: 'JWT' };
+  const now = Math.floor(Date.now() / 1000);
+  const body = { ...payload, iat: now, exp: now + expiresInSeconds };
+  const h = base64urlEncode(JSON.stringify(header));
+  const p = base64urlEncode(JSON.stringify(body));
+  const toSign = `${h}.${p}`;
+  const sig = base64urlEncode(
+    crypto.createHmac('sha256', secret).update(toSign).digest()
+  );
+  return `${toSign}.${sig}`;
+}
 
 async function handleTool(toolName, input, phoneNumber) {
   // Buscar usuario por teléfono
@@ -282,6 +430,19 @@ async function handleTool(toolName, input, phoneNumber) {
     .single();
 
   const userId = usuario?.id || null;
+  const userRole = usuario?.rol || null;
+
+  // Role gate — devuelve un resultado estructurado que Claude traduce al usuario
+  const requiredRoles = TOOL_ROLES[toolName];
+  if (requiredRoles && !requiredRoles.includes(userRole)) {
+    return JSON.stringify({
+      error: 'permiso_denegado',
+      tool: toolName,
+      rol_actual: userRole,
+      roles_requeridos: requiredRoles,
+      mensaje: `Esta acción requiere rol ${requiredRoles.join(' o ')}.`,
+    });
+  }
 
   switch (toolName) {
     case 'registrar_movimiento': {
@@ -551,6 +712,238 @@ async function handleTool(toolName, input, phoneNumber) {
       });
     }
 
+    case 'registrar_contratista': {
+      if (!input.confirmar_duplicado) {
+        const { data: dup } = await supabase
+          .from('contratistas')
+          .select('id, nombre, especialidad, telefono, activo')
+          .ilike('nombre', input.nombre)
+          .eq('activo', true);
+
+        if (dup && dup.length > 0) {
+          return JSON.stringify({
+            warning: 'posible_duplicado',
+            coincidencias: dup,
+            mensaje:
+              'Ya existe un contratista con nombre igual o similar. Mostrá las coincidencias al usuario y pedile que confirme. Si confirma que es uno distinto, reintentá con confirmar_duplicado=true.',
+          });
+        }
+      }
+
+      const { data, error } = await supabase
+        .from('contratistas')
+        .insert({
+          nombre: input.nombre,
+          especialidad: input.especialidad || null,
+          telefono: input.telefono || null,
+          notas: input.notas || null,
+          creado_por: userId,
+        })
+        .select()
+        .single();
+
+      if (error) throw new Error(`Error registrando contratista: ${error.message}`);
+
+      return JSON.stringify({
+        success: true,
+        contratista_id: data.id,
+        nombre: data.nombre,
+        especialidad: data.especialidad,
+      });
+    }
+
+    case 'registrar_contrato': {
+      const { data, error } = await supabase
+        .from('contratos')
+        .insert({
+          contratista_id: input.contratista_id,
+          proyecto_id: input.proyecto_id,
+          descripcion: input.descripcion || null,
+          monto_original: input.monto_original,
+          fecha_inicio: input.fecha_inicio || null,
+          fecha_fin_estimada: input.fecha_fin_estimada || null,
+          notas: input.notas || null,
+          creado_por: userId,
+        })
+        .select(
+          `id, descripcion, monto_original, fecha_inicio, fecha_fin_estimada, estado,
+           contratistas(nombre, especialidad),
+           proyectos(nombre)`
+        )
+        .single();
+
+      if (error) throw new Error(`Error registrando contrato: ${error.message}`);
+
+      return JSON.stringify({
+        success: true,
+        contrato_id: data.id,
+        contratista: data.contratistas?.nombre,
+        especialidad: data.contratistas?.especialidad,
+        proyecto: data.proyectos?.nombre,
+        descripcion: data.descripcion,
+        monto_original: data.monto_original,
+        fecha_inicio: data.fecha_inicio,
+        fecha_fin_estimada: data.fecha_fin_estimada,
+        estado: data.estado,
+      });
+    }
+
+    case 'registrar_orden_cambio': {
+      const { data, error } = await supabase
+        .from('ordenes_cambio')
+        .insert({
+          contrato_id: input.contrato_id,
+          descripcion: input.descripcion,
+          monto: input.monto,
+          fecha: input.fecha || new Date().toISOString().split('T')[0],
+          creado_por: userId,
+        })
+        .select()
+        .single();
+
+      if (error) throw new Error(`Error registrando orden de cambio: ${error.message}`);
+
+      const { data: resumen } = await supabase
+        .from('v_resumen_contratos')
+        .select('contratista_nombre, proyecto_nombre, monto_vigente, total_pagado, saldo_pendiente, porcentaje_pagado')
+        .eq('contrato_id', input.contrato_id)
+        .single();
+
+      return JSON.stringify({
+        success: true,
+        orden_id: data.id,
+        monto_ajuste: data.monto,
+        descripcion: data.descripcion,
+        fecha: data.fecha,
+        contratista: resumen?.contratista_nombre,
+        proyecto: resumen?.proyecto_nombre,
+        nuevo_monto_vigente: resumen?.monto_vigente,
+        total_pagado: resumen?.total_pagado,
+        nuevo_saldo_pendiente: resumen?.saldo_pendiente,
+        porcentaje_pagado: resumen?.porcentaje_pagado,
+      });
+    }
+
+    case 'registrar_pago_contratista': {
+      const { data: resumen, error: resErr } = await supabase
+        .from('v_resumen_contratos')
+        .select('contratista_nombre, proyecto_nombre, monto_vigente, total_pagado, saldo_pendiente, porcentaje_pagado')
+        .eq('contrato_id', input.contrato_id)
+        .single();
+
+      if (resErr || !resumen) throw new Error('Contrato no encontrado.');
+
+      if (input.monto > resumen.saldo_pendiente && !input.confirmar_sobregiro) {
+        return JSON.stringify({
+          warning: 'pago_excede_saldo',
+          contratista: resumen.contratista_nombre,
+          proyecto: resumen.proyecto_nombre,
+          saldo_pendiente: resumen.saldo_pendiente,
+          monto_solicitado: input.monto,
+          excedente: input.monto - resumen.saldo_pendiente,
+          mensaje:
+            'El pago excede el saldo pendiente del contrato. Mostrá los números al usuario y pedile que confirme el sobregiro. Si confirma, reintentá con confirmar_sobregiro=true.',
+        });
+      }
+
+      const { data, error } = await supabase
+        .from('pagos_contratista')
+        .insert({
+          contrato_id: input.contrato_id,
+          monto: input.monto,
+          fecha_pago: input.fecha_pago || new Date().toISOString().split('T')[0],
+          numero_cuota: input.numero_cuota || null,
+          descripcion: input.descripcion || null,
+          registrado_por: userId,
+        })
+        .select()
+        .single();
+
+      if (error) throw new Error(`Error registrando pago: ${error.message}`);
+
+      const { data: nuevoResumen } = await supabase
+        .from('v_resumen_contratos')
+        .select('contratista_nombre, proyecto_nombre, monto_vigente, total_pagado, saldo_pendiente, porcentaje_pagado')
+        .eq('contrato_id', input.contrato_id)
+        .single();
+
+      return JSON.stringify({
+        success: true,
+        pago_id: data.id,
+        monto_pagado: data.monto,
+        fecha_pago: data.fecha_pago,
+        numero_cuota: data.numero_cuota,
+        contratista: nuevoResumen?.contratista_nombre,
+        proyecto: nuevoResumen?.proyecto_nombre,
+        monto_vigente: nuevoResumen?.monto_vigente,
+        total_pagado: nuevoResumen?.total_pagado,
+        saldo_pendiente: nuevoResumen?.saldo_pendiente,
+        porcentaje_pagado: nuevoResumen?.porcentaje_pagado,
+      });
+    }
+
+    case 'generar_link_dashboard': {
+      const secret = process.env.DASHBOARD_JWT_SECRET;
+      const baseUrl = process.env.DASHBOARD_BASE_URL;
+
+      if (!secret) throw new Error('DASHBOARD_JWT_SECRET no está configurado.');
+      if (!baseUrl) throw new Error('DASHBOARD_BASE_URL no está configurada.');
+
+      const { data: proyecto, error: pErr } = await supabase
+        .from('proyectos')
+        .select('id, nombre')
+        .eq('id', input.proyecto_id)
+        .single();
+
+      if (pErr || !proyecto) throw new Error('Proyecto no encontrado.');
+
+      const horas = Math.min(Math.max(input.horas_validez || 24, 1), 168);
+      const token = signDashboardToken(
+        { proyecto_id: proyecto.id, sub: userId || phoneNumber, rol: userRole },
+        secret,
+        horas * 3600
+      );
+      const link = `${baseUrl.replace(/\/$/, '')}/proyecto/${proyecto.id}?token=${token}`;
+
+      return JSON.stringify({
+        success: true,
+        proyecto: proyecto.nombre,
+        link,
+        validez_horas: horas,
+      });
+    }
+
+    case 'consultar_contratistas': {
+      let query = supabase.from('v_resumen_contratos').select('*');
+
+      if (input.contrato_id) query = query.eq('contrato_id', input.contrato_id);
+      if (input.contratista_id) query = query.eq('contratista_id', input.contratista_id);
+      if (input.proyecto_id) query = query.eq('proyecto_id', input.proyecto_id);
+      query = query.eq('estado', input.estado || 'activo');
+
+      const { data, error } = await query.order('proyecto_nombre', { ascending: true });
+      if (error) throw new Error(`Error consultando contratistas: ${error.message}`);
+
+      const contratos = data || [];
+
+      if (input.incluir_pagos && contratos.length > 0) {
+        for (const c of contratos) {
+          const { data: pagos } = await supabase
+            .from('pagos_contratista')
+            .select('id, monto, fecha_pago, numero_cuota, descripcion')
+            .eq('contrato_id', c.contrato_id)
+            .order('fecha_pago', { ascending: false });
+          c.pagos = pagos || [];
+        }
+      }
+
+      return JSON.stringify({
+        total: contratos.length,
+        estado_filtrado: input.estado || 'activo',
+        contratos,
+      });
+    }
+
     default:
       return JSON.stringify({ error: `Tool desconocida: ${toolName}` });
   }
@@ -690,8 +1083,17 @@ async function downloadWhatsAppMedia(mediaId) {
   return { buffer, mimeType };
 }
 
+function extensionForMime(mimeType) {
+  if (!mimeType) return 'bin';
+  if (mimeType.includes('pdf')) return 'pdf';
+  if (mimeType.includes('png')) return 'png';
+  if (mimeType.includes('webp')) return 'webp';
+  if (mimeType.includes('gif')) return 'gif';
+  return 'jpeg';
+}
+
 async function uploadToSupabase(buffer, mimeType) {
-  const ext = mimeType.includes('png') ? 'png' : 'jpeg';
+  const ext = extensionForMime(mimeType);
   const fileName = `${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`;
   const filePath = `incoming/${fileName}`;
 
@@ -715,47 +1117,135 @@ async function uploadToSupabase(buffer, mimeType) {
   };
 }
 
-async function processInvoiceImage(phoneNumber, mediaId, caption) {
+// Límite seguro para documentos enviados a Claude (fotos y PDFs).
+// Claude acepta hasta ~5MB; dejamos margen para base64 overhead.
+const MAX_DOC_BYTES = 4.5 * 1024 * 1024;
+
+// Handler unificado para fotos y PDFs. El guardarraíl primario es la factura
+// (caso más frecuente), pero Claude puede procesar otros docs de construcción.
+async function handleDocumentMessage(message, usuario) {
+  const phoneNumber = message.from;
+  const type = message.type;
+  const payload = type === 'document' ? message.document : message.image;
+  const mediaId = payload?.id;
+  const caption = payload?.caption || '';
+  const filename = payload?.filename || '';
+
+  if (!mediaId) {
+    return 'Mae, no encontré el archivo adjunto. Intentá enviarlo de nuevo 📎';
+  }
+
   try {
-    // 1. Download from WhatsApp
     const { buffer, mimeType } = await downloadWhatsAppMedia(mediaId);
 
-    // 2. Upload to Supabase Storage
+    if (buffer.byteLength > MAX_DOC_BYTES) {
+      const mb = (buffer.byteLength / (1024 * 1024)).toFixed(1);
+      return `Mae, el archivo está muy grande (${mb} MB). El máximo es 4.5 MB. ¿Podés mandarme una foto más clara o un PDF más liviano? 📎`;
+    }
+
+    const isPdf = type === 'document' || (mimeType || '').includes('pdf');
+
+    // Guardamos en Storage para auditoría (igual que el flujo original de facturas).
     const { path, url } = await uploadToSupabase(buffer, mimeType);
 
-    // 3. Convert image to base64 for Claude Vision
-    const base64Image = buffer.toString('base64');
+    const base64Data = buffer.toString('base64');
+    const mediaBlock = isPdf
+      ? {
+          type: 'document',
+          source: {
+            type: 'base64',
+            media_type: 'application/pdf',
+            data: base64Data,
+          },
+        }
+      : {
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: mimeType || 'image/jpeg',
+            data: base64Data,
+          },
+        };
 
-    // 4. Build message with image for Claude
-    const userContent = [
-      {
-        type: 'image',
-        source: {
-          type: 'base64',
-          media_type: mimeType,
-          data: base64Image,
-        },
-      },
-      {
-        type: 'text',
-        text: `El usuario envió esta foto de una factura.${caption ? ` Mensaje del usuario: "${caption}"` : ''}
+    const docLabel = isPdf
+      ? `un PDF${filename ? ` ("${filename}")` : ''}`
+      : 'una foto';
+    const contextoUsuario = usuario?.nombre
+      ? ` Remitente: ${usuario.nombre} (rol ${usuario.rol}).`
+      : '';
+    const contextoCaption = caption ? `\nMensaje del usuario junto con el archivo: "${caption}"` : '';
 
-INSTRUCCIONES:
-1. Analizá la imagen y extraé: proveedor, fecha, items (material, cantidad, unidad, precio unitario, precio total), y total general.
-2. Llamá la tool registrar_factura_escaneada con los datos extraídos.
+    const instrucciones = `El usuario envió ${docLabel}.${contextoUsuario}${contextoCaption}
+
+INSTRUCCIONES para procesar este documento:
+
+1. Primero decidí qué tipo de documento es. Debe ser relacionado a construcción: factura, recibo, nota de entrega, cotización, contrato, plano, orden de compra, etc. Si claramente NO es un documento de construcción (por ejemplo: foto personal, meme, documento de otra industria sin relación al trabajo), NO llamés ninguna tool. Respondé amablemente al usuario que este canal solo procesa documentos relacionados a los proyectos.
+
+2. CASO PRINCIPAL — FACTURA o RECIBO: Es lo más frecuente. Extraé: proveedor, fecha, items (material, cantidad, unidad, precio unitario, precio total) y total general. Luego llamá la tool registrar_factura_escaneada con esos datos:
    - imagen_url: "${url}"
    - imagen_path: "${path}"
-3. Después de registrar, mostrá los datos al usuario y pedí confirmación.
-4. Si no podés leer algo claramente, indicalo.`,
-      },
-    ];
+   Después mostrá los datos al usuario y pedí confirmación siguiendo el FLUJO DE FACTURA definido en tu prompt.
 
-    // 5. Send to Claude agentic loop
+3. OTROS DOCUMENTOS DE CONSTRUCCIÓN (cotización, contrato, nota de entrega, etc.): resumí al usuario lo que encontraste (proveedor, fecha, montos relevantes, items principales o puntos clave) y preguntale qué querés que haga con eso. NO registrés como factura sin confirmación explícita.
+
+4. Si la imagen/PDF está borroso o no podés leer algo clave, decilo claramente y pedí otra foto o PDF más legible.`;
+
+    const userContent = [mediaBlock, { type: 'text', text: instrucciones }];
+
     const reply = await askClaude(phoneNumber, userContent);
     return reply;
   } catch (err) {
-    console.error('Error processing invoice image:', err);
-    return 'Mae, no pude procesar esa imagen. ¿Podés mandarla de nuevo? Intentá que la foto esté bien iluminada y enfocada 📸';
+    console.error('Error processing document:', err);
+    return 'Mae, no pude procesar ese archivo. ¿Podés mandarlo de nuevo? Si es foto, asegurate que esté bien iluminada y enfocada 📎';
+  }
+}
+
+// ============================================================
+// WHATSAPP VOICE HANDLING (OpenAI Whisper)
+// ============================================================
+
+async function transcribeAudio(buffer, mimeType) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error('OPENAI_API_KEY no está configurada.');
+
+  // WhatsApp voice notes son audio/ogg; opus. Whisper detecta por extensión.
+  const form = new FormData();
+  form.append('file', new Blob([buffer], { type: mimeType || 'audio/ogg' }), 'audio.ogg');
+  form.append('model', 'whisper-1');
+  form.append('language', 'es');
+
+  const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}` },
+    body: form,
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Whisper API error (${res.status}): ${errText}`);
+  }
+
+  const data = await res.json();
+  return (data.text || '').trim();
+}
+
+async function processVoiceMessage(phoneNumber, mediaId) {
+  try {
+    const { buffer, mimeType } = await downloadWhatsAppMedia(mediaId);
+    const transcription = await transcribeAudio(buffer, mimeType);
+
+    if (!transcription) {
+      return 'Mae, no logré entender la nota de voz. ¿Podés mandarla de nuevo o escribirme el mensaje? 🎙️';
+    }
+
+    console.log(`Transcription for ${phoneNumber}: ${transcription}`);
+
+    const userInput = `🎙️ Escuché: "${transcription}"\n\n${transcription}`;
+    const reply = await askClaude(phoneNumber, userInput);
+    return reply;
+  } catch (err) {
+    console.error('Error processing voice message:', err);
+    return 'Mae, no pude procesar la nota de voz. Intentá de nuevo o escribime el mensaje por favor 🎙️';
   }
 }
 
@@ -954,22 +1444,43 @@ const server = http.createServer((req, res) => {
               .catch((err) => {
                 console.error('Error in message pipeline:', err);
               });
-          } else if (type === 'image') {
-            const mediaId = message.image?.id;
-            const caption = message.image?.caption || '';
-            console.log(`Image from ${from} (media_id: ${mediaId})`);
+          } else if (type === 'image' || type === 'document') {
+            console.log(`${type === 'document' ? 'Document' : 'Image'} from ${from}`);
+
+            supabase
+              .from('usuarios')
+              .select('id, nombre, rol')
+              .eq('telefono', from)
+              .single()
+              .then(({ data: usuario }) =>
+                handleDocumentMessage(message, usuario || null)
+              )
+              .then((reply) => {
+                console.log(`Document reply to ${from}: ${reply.substring(0, 100)}...`);
+                return sendWhatsAppMessage(from, reply);
+              })
+              .catch((err) => {
+                console.error('Error in document pipeline:', err);
+                sendWhatsAppMessage(
+                  from,
+                  'Mae, no pude procesar ese archivo. Intentá de nuevo 📎'
+                );
+              });
+          } else if (type === 'audio') {
+            const mediaId = message.audio?.id;
+            console.log(`Audio from ${from} (media_id: ${mediaId})`);
 
             if (mediaId) {
-              processInvoiceImage(from, mediaId, caption)
+              processVoiceMessage(from, mediaId)
                 .then((reply) => {
-                  console.log(`Image reply to ${from}: ${reply.substring(0, 100)}...`);
+                  console.log(`Voice reply to ${from}: ${reply.substring(0, 100)}...`);
                   return sendWhatsAppMessage(from, reply);
                 })
                 .catch((err) => {
-                  console.error('Error in image pipeline:', err);
+                  console.error('Error in voice pipeline:', err);
                   sendWhatsAppMessage(
                     from,
-                    'Mae, no pude procesar esa imagen. Intentá de nuevo 📸'
+                    'Mae, no pude procesar la nota de voz. Intentá de nuevo o escribime el mensaje 🎙️'
                   );
                 });
             }
@@ -977,7 +1488,7 @@ const server = http.createServer((req, res) => {
             console.log(`Unsupported message type from ${from}: ${type}`);
             sendWhatsAppMessage(
               from,
-              'Por ahora solo puedo leer mensajes de texto y fotos de facturas 📸'
+              'Por ahora solo puedo leer mensajes de texto, notas de voz y fotos 📸🎙️'
             );
           }
         }
