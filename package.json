@@ -1,16 +1,35 @@
 {
   "name": "proveeduria-webhook",
   "version": "2.0.0",
-  "description": "WhatsApp-based materials tracking for construction companies",
+  "description": "WhatsApp-operated procurement system for Proyekta (Modulo 1)",
   "main": "server.js",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "build:all": "npm run build -w @proveeduria/core -w @proveeduria/db -w @proveeduria/agent && npm run build -w @proveeduria/api -w @proveeduria/worker",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test:all": "npm run test --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "migrate": "npm run migrate -w @proveeduria/db",
+    "migrate:status": "npm run migrate:status -w @proveeduria/db",
+    "seed": "npm run seed -w @proveeduria/db"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
     "@supabase/supabase-js": "^2.49.1"
   },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   }
 }

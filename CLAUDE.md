@@ -15,6 +15,18 @@ WhatsApp-operated procurement system ("proveeduría") for Proyekta, a Costa Rica
 
 `docs/EXECUTION_PLAN.md` defines the target architecture (Azure, Postgres state machine + outbox, queue worker). Domain behavior is specified in `docs/specs/` — **state-machine.md** (pedido states/transitions), **data-model.md**, **exceptions.md** (deterministic escalation rules), **tools.md** (agent tool contracts + prototype-parity table), **templates-whatsapp.md**. Rule: no behavior change without updating the relevant spec first. `server.js` is behavior reference only — do not grow it with new production features; the `registrar_contratista`/contract tools in it are out of Módulo 1 scope and must not be migrated.
 
+## Módulo 1 monorepo (`apps/*`, `packages/*`)
+
+The production system is being built as an npm-workspaces monorepo alongside the legacy prototype (which stays as behavior reference, untouched). New code is **TypeScript, ESM, NodeNext** — relative imports carry the `.js` extension, `import type` for types — under a strict `tsconfig.base.json`. Cross-package imports resolve via the workspace symlink to each lib's built `.d.ts`, so **libs build before apps** (`build:all` orders `core`/`db` first). Each package has its own `CLAUDE.md` with its invariants.
+
+- `packages/core` — pure domain: state machine, correlative numbering, roles/permissions, approval policy, deterministic exception rules. No IO; time passed as a param; returns `Result<T,E>`. **Protected code** (AI_ASSISTED_DEVELOPMENT.md §2): update the spec first, keep tests exhaustive. `packages/core/src/types.ts` is the frozen domain type contract everything imports.
+- `packages/db` — versioned plain-SQL migrations (`migrations/NNN_*.sql`) + idempotent seeds, applied by `scripts/migrate.mjs` (replaces manual Supabase SQL). Enforces append-only `audit_events` (row + statement/TRUNCATE triggers), the pedido transition trigger, correlative sequences, `wamid` uniqueness.
+- `packages/agent` — Fase 2 stub (agent prompt / tools / extractors).
+- `apps/api` — production-safe webhook ingest: verify `X-Hub-Signature-256` → dedup by `wamid` → persist → enqueue → 200; fail-closed (missing secret or prod-without-queue refuses to start).
+- `apps/worker` — queue-consumer stub (domain engine is Fase 2).
+
+Commands (root): `npm install`; `npm run build:all`; `npm run typecheck`; `npm run test:all`; `DATABASE_URL=… npm run migrate && npm run seed`. CI is `.github/workflows/ci.yml` (build + typecheck + tests, plus an ephemeral-Postgres migration gate) — separate from the legacy Azure deploy workflows.
+
 ## Commands
 
 Root (webhook):

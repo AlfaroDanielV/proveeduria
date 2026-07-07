@@ -1,0 +1,17 @@
+{
+  "name": "@proveeduria/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node -e \"''\"",
+    "typecheck": "node -e \"''\"",
+    "migrate": "node scripts/migrate.mjs up",
+    "migrate:status": "node scripts/migrate.mjs status",
+    "seed": "node scripts/migrate.mjs seed",
+    "test:schema": "node --test tests/"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  }
+}

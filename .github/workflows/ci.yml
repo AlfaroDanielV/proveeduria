@@ -1,0 +1,68 @@
+# CI for the Modulo 1 monorepo (packages/* + apps/*).
+# The legacy prototype (server.js + dashboard/) is deployed by the other workflows
+# and is intentionally NOT built/tested here.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: build + typecheck + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+      - name: Install (workspaces)
+        run: npm install
+      - name: Build (libs first, then apps)
+        run: npm run build:all
+      - name: Typecheck (incl. tests)
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm run test:all
+
+  migrations-gate:
+    name: migrations apply on ephemeral Postgres
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: provee
+          POSTGRES_PASSWORD: provee
+          POSTGRES_DB: provee_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U provee"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://provee:provee@localhost:5432/provee_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+      - name: Install (workspaces)
+        run: npm install
+      - name: Apply migrations
+        run: npm run migrate
+      - name: Load seeds
+        run: npm run seed
+      - name: Schema tests
+        run: npm run test:schema -w @proveeduria/db --if-present

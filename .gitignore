@@ -1,3 +1,18 @@
 node_modules/
 .env
+.env.*
+!.env.example
 *.log
+
+# TypeScript / build output
+dist/
+*.tsbuildinfo
+
+# Test / coverage
+coverage/
+.vitest/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

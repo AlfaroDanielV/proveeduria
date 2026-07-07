@@ -68,7 +68,7 @@ Contrato de cada herramienta expuesta al agente Claude. Reglas transversales:
 - **Efecto**: `receipt_confirmations`; diferencias → E5; si concilia, actualiza estado de OC y del pedido (`recepcion_parcial|recepcion_total`). Registra `approval_events(recepcion)`.
 
 ### `asociar_nota_credito`
-- **Roles**: admin_materiales, superadmin (proveedor puede enviarla; la aplicación es interna).
+- **Roles**: admin_materiales, superadmin (proveedor puede enviarla; la aplicación es interna). Registra `approval_events(nc)` al aplicar (aprobación humana obligatoria, EXECUTION_PLAN §1.5 "aplicación de NC ambigua").
 - **Efecto**: match a factura origen; único e inequívoco → `aplicada` y ajuste de costo real (vista); ambiguo → E6.
 
 ### `cerrar_pedido`
