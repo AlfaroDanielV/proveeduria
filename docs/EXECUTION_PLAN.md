@@ -78,7 +78,8 @@ Los flujos de excepción del PDF §4.6 se implementan como **reglas determinista
 ### Política de decisión
 
 - El agente **siempre puede recomendar**.
-- Adjudicación y emisión de OC **siempre** requieren aprobación de José Pablo (o rol Proveeduría) por WhatsApp o portal. El PDF lo define así; no se implementa auto-award en Módulo 1. La tabla `approval_events` registra quién aprobó qué, cuándo y desde qué canal.
+- Adjudicación y emisión de OC **siempre** requieren aprobación de José Pablo (o rol Proveeduría) por WhatsApp o portal. El PDF lo define así; no se implementa auto-award en Módulo 1. La tabla `approval_events` registra quién apro
+bó qué, cuándo y desde qué canal.
 
 ---
 

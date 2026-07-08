@@ -48,3 +48,11 @@ export interface ContextoRemitente {
   readonly roles?: readonly Rol[];
   readonly supplierContactId?: string;
 }
+
+export * from './runtime/types.js';
+export * from './runtime/tx.js';
+export * from './runtime/audit.js';
+export * from './runtime/outbox.js';
+export * from './runtime/repos.js';
+export * from './runtime/context.js';
+export * from './tools/pedido.js';

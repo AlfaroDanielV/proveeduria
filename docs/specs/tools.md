@@ -18,7 +18,7 @@ Contrato de cada herramienta expuesta al agente Claude. Reglas transversales:
 
 ### `confirmar_pedido`
 - **Roles**: el solicitante del pedido.
-- **Efecto**: fija el resumen confirmado; notifica a Proveeduría que hay pedido nuevo por gestionar.
+- **Efecto**: fija el resumen confirmado (`pedidos.confirmado_at`/`confirmado_por`, sin cambiar `estado=borrador`); notifica a Proveeduría que hay pedido nuevo por gestionar.
 
 ## Cotizaciones
 

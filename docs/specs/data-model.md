@@ -20,7 +20,7 @@ Convenciones: snake_case, PK `id uuid default gen_random_uuid()`, timestamps `cr
 
 ## Flujo de pedido
 
-- `pedidos` — numero (`PED-YYYY-NNN`, unique, secuencia transaccional por año), project_id, solicitante_user_id, estado (enum de state-machine.md), fecha_requerida, urgencia, plazo_cotizacion_at, cerrado_por/cerrado_at, cancelado_motivo.
+- `pedidos` — numero (`PED-YYYY-NNN`, unique, secuencia transaccional por año), project_id, solicitante_user_id, estado (enum de state-machine.md), fecha_requerida, urgencia, confirmado_at/confirmado_por (confirmación del resumen; no transiciona estado), plazo_cotizacion_at, cerrado_por/cerrado_at, cancelado_motivo.
 - `pedido_items` — pedido_id, descripcion, cantidad numeric, unidad, notas. Texto libre normalizado por el agente; sin FK a catálogo en Módulo 1.
 - `quote_requests` — pedido_id, supplier_id, enviado_at (via outbox), plazo_at, estado: `enviada|respondida|vencida|declinada`.
 - `quote_responses` — quote_request_id, recibido_at, fuente (`texto|imagen|pdf|audio`), attachment_id, condiciones, plazo_entrega, confianza_extraccion numeric(3,2), estado: `completa|incompleta|descartada`.
