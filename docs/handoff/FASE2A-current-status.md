@@ -7,7 +7,8 @@ Ultima actualizacion: despues de implementar `generarComparativo` deterministico
 
 El proyecto esta en **Fase 2a — Prototipo navegable**, pero aun no alcanza el hito completo
 de dia 30. La capa deterministica de tools ya cubre el flujo pedido hasta `en_revision` con
-comparativo generado; falta conectarla al worker/router/Claude loop y construir el portal.
+comparativo generado, y el worker ya tiene handler/router de dominio inicial. Falta el loop
+Claude/extractores, broker/dispatcher reales y el portal.
 
 ## Ya implementado
 
@@ -66,6 +67,24 @@ En `packages/db/migrations/005_pedidos_confirmacion.sql`:
 
 - Agrega `pedidos.confirmado_at` y `pedidos.confirmado_por`.
 
+En `apps/worker/src/domain/`:
+
+- `handler.ts`
+  - Lee `inbound_messages` por `wamid` dentro de transaccion.
+  - Si `processed_at` ya existe, hace skip idempotente.
+  - Toma `pg_advisory_xact_lock(hashtext(...))` cuando el job trae `pedidoId`.
+  - Resuelve remitente y crea `Ctx` de `@proveeduria/agent` para internos con origen `wamid`.
+  - Marca `processed_at` solo despues de que el engine termina sin lanzar.
+- `router.ts`
+  - Resuelve telefono contra `users` activos y luego `supplier_contacts`.
+  - Tolera telefono con o sin `+`.
+- `e11.ts`
+  - Para remitente desconocido encola respuesta generica por `outbox_messages` y registra
+    `audit_event(remitente_desconocido)`.
+- `structured-engine.ts`
+  - Engine temporal para payloads `tool_call` ya estructurados.
+  - No reemplaza Claude loop ni extractores; solo deja el seam ejecutable y testeable.
+
 ## Verificacion ya corrida
 
 Pasaron:
@@ -81,23 +100,24 @@ Tambien paso un integration test contra Postgres efimero con:
 - migraciones `001` a `005`
 - `npm run seed`
 - flujo real `crear -> confirmar -> sugerir -> enviar RFQ -> registrar 2 cotizaciones -> en_revision -> comparativo`
+- worker domain handler: `inbound_messages` real -> router interno -> `processed_at`, y E11
+  desconocido -> `outbox_messages` + `audit_events`.
 
-El test esta en `packages/agent/src/tools/pedido.integration.test.ts` y solo corre si
-`DATABASE_URL` contiene `provee_test`; si no, queda skipped.
+Los tests estan en `packages/agent/src/tools/pedido.integration.test.ts` y
+`apps/worker/src/domain/handler.integration.test.ts`; solo corren si `DATABASE_URL`
+contiene `provee_test`, si no quedan skipped.
 
 ## Lo que falta para completar Fase 2a
 
 Siguiente bloque natural:
 
-1. Worker/router
-   - Resolver remitente interno/proveedor/desconocido.
-   - Crear `Ctx` real con actor, origen, `withTx` y repos PG.
-   - Invocar tools desde jobs persistidos de `inbound_messages`.
-2. Claude/tool loop
+1. Claude/tool loop
    - Prompt de produccion lo edita el humano.
    - El agente solo decide tool calls dentro del contrato; permisos y excepciones quedan en tools.
-3. Extractores estructurados
+2. Extractores estructurados
    - Texto/voz/foto de pedido/cotizacion hacia inputs estrictos de tools.
+3. Broker/dispatcher reales
+   - Consumidor real de cola y envio de `outbox_messages` con `wamid_salida`/reintentos.
 4. Portal Fase 2a
    - Lista de pedidos por estado.
    - Detalle de pedido.

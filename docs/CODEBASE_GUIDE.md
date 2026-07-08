@@ -14,8 +14,9 @@ Hay dos sistemas conviviendo:
   de produccion definido por `docs/EXECUTION_PLAN.md`.
 
 El sistema nuevo esta en **Fase 2a**. Ya existe la capa deterministica de tools para pedido/RFQ/
-cotizaciones hasta `pedido.estado = en_revision` con comparativo generado, pero aun falta
-conectarla al worker, al router, al loop Claude y al portal.
+cotizaciones hasta `pedido.estado = en_revision` con comparativo generado, y el worker ya tiene
+un handler/router de dominio inicial. Aun falta el loop Claude, extractores, broker real,
+dispatcher de outbox y portal.
 
 ## Mapa principal
 
@@ -85,7 +86,8 @@ Runtime y tools deterministicas del agente.
 - `src/tools/pedido.test.ts`: contrato unitario con fakes.
 - `src/tools/pedido.integration.test.ts`: flujo real contra Postgres efimero.
 
-Hoy estas tools se prueban directamente; todavia no estan conectadas al worker.
+Hoy estas tools se prueban directamente y el worker puede recibir un engine estructurado
+inyectable, pero aun falta el loop Claude que decida tool calls desde conversacion libre.
 
 ### `apps/api/`
 
@@ -106,11 +108,17 @@ Consumidor de cola y futuro motor de dominio.
 
 - `src/consumer.ts`: loop generico `poll -> handler -> ack/nack`.
 - `src/handlers/echo.ts`: handler minimo actual.
+- `src/domain/handler.ts`: handler de dominio Fase 2a; abre transaccion, lee
+  `inbound_messages`, aplica idempotencia, lock por pedido, resuelve remitente y crea `Ctx`.
+- `src/domain/router.ts`: resolucion `users`/`supplier_contacts`/desconocido por telefono.
+- `src/domain/e11.ts`: respuesta generica + audit/outbox para remitente desconocido.
+- `src/domain/structured-engine.ts`: engine temporal para payloads `tool_call` ya
+  estructurados; no reemplaza Claude loop ni extractores.
 - `src/queue/`: consumidor in-memory para tests/stub.
 - `src/config.ts`: config del worker.
 
-Hoy es un stub navegable. El siguiente salto real es reemplazar `echo` por un handler que lea
-`inbound_messages`, resuelva remitente/contexto, abra `withTx`, cree `Ctx` e invoque tools.
+El arranque por defecto sigue usando `echo` hasta tener broker/engine reales. El handler de
+dominio ya esta listo para inyectarse en tests o en wiring posterior.
 
 ### `server.js` y `dashboard/`
 
@@ -165,7 +173,9 @@ rollback de dominio + audit/outbox/approval/review.
 ### Camino actual del webhook
 
 `apps/api` ya implementa la parte segura de entrada: verificar firma, deduplicar por `wamid`,
-persistir antes de procesar y encolar. `apps/worker` todavia no invoca `packages/agent`.
+persistir antes de procesar y encolar. `apps/worker` ya puede leer el mensaje persistido,
+resolver remitente y crear `Ctx`; todavia falta el loop Claude/extractor real para convertir
+conversacion libre en tool calls.
 
 ## Como va a funcionar end-to-end completo
 
@@ -195,9 +205,9 @@ El flujo objetivo del Modulo 1 es:
 
 Para completar el prototipo navegable:
 
-1. Conectar worker/router al flujo de tools.
-2. Integrar extractor estructurado para texto/voz/foto de pedido/cotizacion.
-3. Hacer que Claude invoque tools, pero sin decidir permisos ni saltarse guardas.
+1. Integrar extractor estructurado para texto/voz/foto de pedido/cotizacion.
+2. Hacer que Claude invoque tools, pero sin decidir permisos ni saltarse guardas.
+3. Conectar broker real y dispatcher de outbox.
 4. Portal: lista de pedidos, detalle, comparativo.
 
 ## Comandos de verificacion

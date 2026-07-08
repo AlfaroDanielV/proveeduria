@@ -24,8 +24,9 @@ Implementado y verificado con unit tests + integration test contra Postgres efim
 
 No implementado aun:
 
-- Router por remitente (interno/proveedor/desconocido) y resolucion de actor real desde el worker.
 - Loop Claude/tool-use y prompt de produccion.
+- Router conversacional del agente. El worker ya tiene una primera resolucion
+  `interno|proveedor|desconocido` y crea `Ctx` para internos.
 - Extractores OCR/Vision/audio; `registrarCotizacion` recibe input ya estructurado.
 - Portal de pedidos/comparativo y dispatcher real de outbox.
 

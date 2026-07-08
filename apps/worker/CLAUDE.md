@@ -6,13 +6,24 @@ Consume los jobs que `apps/api` encola y ejecuta **todo el trabajo pesado**: age
 de estados de `@proveeduria/core`, el dispatcher del `outbox` a WhatsApp, y los cron
 (vencimiento de plazos E1, atascos E13, resumen diario).
 
-## Estado en este incremento (Fase 1)
+## Estado actual Fase 2a
 
-**Stub navegable**: el esqueleto del consumidor existe y arranca, pero los handlers de
-dominio aun no estan implementados (Fase 2). El objetivo Fase-1 es cerrar el lazo
-"mensaje entra en api → se persiste → worker lo toma → responde" con un handler minimo.
+El esqueleto del consumidor sigue arrancando con `echo` por defecto, pero ya existe el
+primer handler de dominio en `src/domain/`:
 
-## Invariantes cuando se implemente el dominio
+- Lee `inbound_messages` por `wamid` con `FOR UPDATE`.
+- Respeta idempotencia por `processed_at`.
+- Toma lock advisory por `pedido_id` cuando el job lo trae.
+- Resuelve remitente `interno|proveedor|desconocido` contra `users` y `supplier_contacts`.
+- Para internos crea `Ctx` real de `@proveeduria/agent` con origen `wamid`.
+- Para desconocidos aplica E11: audit + outbox generico, sin ejecutar tools.
+- Delega a un `DomainEngine` inyectable; el engine estructurado actual solo acepta payloads
+  `tool_call` ya normalizados y no reemplaza al loop Claude ni a extractores.
+
+Pendiente para completar el camino runtime: consumidor real del broker, Claude/tool loop,
+extractores y dispatcher del outbox.
+
+## Invariantes del dominio
 
 - **Orden por pedido**: lock advisory de Postgres por `pedido_id` (no sesiones de broker).
 - **Idempotencia**: un job ya procesado (`inbound_messages.processed_at`) no se reprocesa.

@@ -24,10 +24,12 @@ The production system is being built as an npm-workspaces monorepo alongside the
 - `packages/agent` — Fase 2a en progreso. Ya contiene runtime de tools deterministas
   (`withTx`, repos PG/fakes, audit, outbox, approval) y las tools de pedido/RFQ/cotizacion:
   `crearPedido`, `confirmarPedido`, `sugerirProveedores`, `enviarRfq`, `registrarCotizacion`,
-  `generarComparativo`. Aun faltan router/loop Claude, extractores reales, portal de pedidos y
-  wiring del worker.
+  `generarComparativo`. Aun faltan loop Claude, extractores reales y portal de pedidos.
 - `apps/api` — production-safe webhook ingest: verify `X-Hub-Signature-256` → dedup by `wamid` → persist → enqueue → 200; fail-closed (missing secret or prod-without-queue refuses to start).
-- `apps/worker` — queue-consumer stub (domain engine is Fase 2).
+- `apps/worker` — queue-consumer stub plus Fase 2a domain handler/router: reads
+  `inbound_messages`, resolves sender, creates `Ctx` for internal users, handles E11, and
+  delegates to an injectable domain engine. Broker real, Claude loop and outbox dispatcher are
+  still pending.
 
 Commands (root): `npm install`; `npm run build:all`; `npm run typecheck`; `npm run test:all`; `DATABASE_URL=… npm run migrate && npm run seed`. CI is `.github/workflows/ci.yml` (build + typecheck + tests, plus an ephemeral-Postgres migration gate) — separate from the legacy Azure deploy workflows.
 
@@ -48,7 +50,8 @@ to `en_revision` in tests against real Postgres:
    automatically in the same transaction when the last complete quote moves the pedido to
    `en_revision`.
 
-The integrated worker route from inbound WhatsApp job to these tools is not wired yet.
+The worker now has the domain handler/router seam, but the production Claude loop/extractors
+and real broker/outbox dispatcher are not wired yet.
 For navigation and future sessions, read `docs/CODEBASE_GUIDE.md` and
 `docs/handoff/FASE2A-current-status.md` before continuing.
 
