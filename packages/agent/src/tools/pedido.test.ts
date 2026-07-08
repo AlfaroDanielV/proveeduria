@@ -1,8 +1,22 @@
 import { describe, expect, it } from 'vitest';
 
-import { confirmarPedido, crearPedido, enviarRfq, sugerirProveedores } from './pedido.js';
+import {
+  confirmarPedido,
+  crearPedido,
+  enviarRfq,
+  registrarCotizacion,
+  sugerirProveedores,
+} from './pedido.js';
 import { crearFakeCtx, FakeToolStore, withFakeCtx } from '../runtime/fakes.js';
-import type { Actor, Pedido, Proyecto, Proveedor, UsuarioInterno } from '../runtime/types.js';
+import type {
+  Actor,
+  Pedido,
+  Proyecto,
+  Proveedor,
+  QuoteRequest,
+  QuoteResponse,
+  UsuarioInterno,
+} from '../runtime/types.js';
 
 const AHORA = new Date('2026-07-07T12:00:00.000Z');
 
@@ -117,6 +131,31 @@ function agregarPedidoConItems(store: FakeToolStore, pedido: Pedido = pedidoBase
       unidad: 'unidad',
     },
   ]);
+}
+
+function quoteRequestBase(overrides: Partial<QuoteRequest> = {}): QuoteRequest {
+  return {
+    id: 'quote-request-1',
+    pedidoId: 'pedido-1',
+    supplierId: proveedorRodex.id,
+    plazoAt: new Date('2026-07-08T12:00:00.000Z'),
+    estado: 'enviada',
+    ...overrides,
+  };
+}
+
+function quoteResponseIncompleta(id: string): QuoteResponse {
+  return {
+    id,
+    quoteRequestId: 'quote-request-1',
+    recibidoAt: AHORA,
+    fuente: 'texto',
+    condiciones: null,
+    plazoEntrega: null,
+    confianzaExtraccion: 0.5,
+    estado: 'incompleta',
+    intentosRepregunta: 1,
+  };
 }
 
 describe('crearPedido', () => {
@@ -498,6 +537,168 @@ describe('enviarRfq', () => {
   });
 });
 
+describe('registrarCotizacion', () => {
+  it('registra cotizacion completa y transiciona a en_revision si no quedan pendientes', async () => {
+    const store = storeBase();
+    agregarPedidoConItems(store, pedidoBase({ estado: 'cotizando' }));
+    store.quoteRequests.push(quoteRequestBase());
+    const ctx = crearFakeCtx(store, actorAdminMateriales, AHORA);
+
+    const result = await registrarCotizacion({
+      quoteRequestId: 'quote-request-1',
+      fuente: 'texto',
+      condiciones: 'Credito 30 dias',
+      plazoEntrega: '2 dias',
+      confianzaExtraccion: 0.95,
+      items: [
+        {
+          pedidoItemId: 'item-1',
+          precioUnitario: 4500,
+          cantidad: 10,
+          disponible: true,
+        },
+        {
+          pedidoItemId: 'item-2',
+          precioUnitario: 1200,
+          cantidad: 25,
+          disponible: true,
+        },
+      ],
+    }, ctx);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error.mensaje);
+    expect(result.value).toMatchObject({
+      quoteRequestId: 'quote-request-1',
+      pedidoId: 'pedido-1',
+      pedidoEstado: 'en_revision',
+      transicionoAEnRevision: true,
+    });
+    expect(store.quoteResponses).toHaveLength(1);
+    expect(store.quoteResponses[0]).toMatchObject({
+      estado: 'completa',
+      confianzaExtraccion: 0.95,
+    });
+    expect(store.quoteItems).toHaveLength(2);
+    expect(store.quoteRequests[0]?.estado).toBe('respondida');
+    expect(store.pedidos.get('pedido-1')?.estado).toBe('en_revision');
+    expect(store.auditEvents).toHaveLength(1);
+    expect(store.auditEvents[0]).toMatchObject({
+      accion: 'registrar_cotizacion',
+      entidad: 'quote_response',
+    });
+    expect(store.outboxMessages).toHaveLength(0);
+  });
+
+  it('registra E2 incompleta y encola repregunta al proveedor sin marcar respondida', async () => {
+    const store = storeBase();
+    agregarPedidoConItems(store, pedidoBase({ estado: 'cotizando' }));
+    store.quoteRequests.push(quoteRequestBase());
+    const ctx = crearFakeCtx(store, actorAdminMateriales, AHORA);
+
+    const result = await registrarCotizacion({
+      quoteRequestId: 'quote-request-1',
+      fuente: 'texto',
+      confianzaExtraccion: 0.5,
+      items: [],
+    }, ctx);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('La cotizacion debia quedar incompleta.');
+    expect(result.error.codigo).toBe('E2');
+    expect(store.quoteResponses).toHaveLength(1);
+    expect(store.quoteResponses[0]).toMatchObject({
+      estado: 'incompleta',
+      intentosRepregunta: 1,
+    });
+    expect(store.quoteRequests[0]?.estado).toBe('enviada');
+    expect(store.pedidos.get('pedido-1')?.estado).toBe('cotizando');
+    expect(store.reviewQueue).toHaveLength(0);
+    expect(store.outboxMessages).toHaveLength(1);
+    expect(store.outboxMessages[0]).toMatchObject({
+      destino: '+50688881001',
+      texto: 'No logramos identificar precio y cantidad en la cotizacion del pedido PED-2026-001. ¿Nos lo confirmas por favor?',
+    });
+    expect(store.auditEvents).toHaveLength(1);
+  });
+
+  it('escala E2 a review_queue despues de dos repreguntas previas', async () => {
+    const store = storeBase();
+    agregarPedidoConItems(store, pedidoBase({ estado: 'cotizando' }));
+    store.quoteRequests.push(quoteRequestBase());
+    store.quoteResponses.push(
+      quoteResponseIncompleta('quote-response-prev-1'),
+      quoteResponseIncompleta('quote-response-prev-2'),
+    );
+    const ctx = crearFakeCtx(store, actorAdminMateriales, AHORA);
+
+    const result = await registrarCotizacion({
+      quoteRequestId: 'quote-request-1',
+      fuente: 'texto',
+      confianzaExtraccion: 0.5,
+      items: [],
+    }, ctx);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('La cotizacion debia escalarse.');
+    expect(result.error.codigo).toBe('E2');
+    expect(store.reviewQueue).toHaveLength(1);
+    expect(store.reviewQueue[0]).toMatchObject({
+      tipo: 'cotizacion_incompleta',
+      entidad: 'quote_responses',
+      pedidoId: 'pedido-1',
+    });
+    expect(store.outboxMessages).toHaveLength(1);
+    expect(store.outboxMessages[0]).toMatchObject({
+      destino: '+50688880002',
+      template: 'notificacion_interna',
+    });
+    expect(store.quoteRequests[0]?.estado).toBe('enviada');
+  });
+
+  it('rechaza pedido que no esta cotizando sin efectos', async () => {
+    const store = storeBase();
+    agregarPedidoConItems(store, pedidoBase({ estado: 'borrador' }));
+    store.quoteRequests.push(quoteRequestBase());
+    const ctx = crearFakeCtx(store, actorAdminMateriales, AHORA);
+
+    const result = await registrarCotizacion({
+      quoteRequestId: 'quote-request-1',
+      fuente: 'texto',
+      confianzaExtraccion: 0.95,
+      items: [{ pedidoItemId: 'item-1', precioUnitario: 1, cantidad: 1 }],
+    }, ctx);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('No debia registrar cotizacion.');
+    expect(result.error.codigo).toBe('E12');
+    expect(store.quoteResponses).toHaveLength(0);
+    expect(store.quoteItems).toHaveLength(0);
+    expect(store.auditEvents).toHaveLength(0);
+  });
+
+  it('rechaza pedido_item_id que no pertenece al pedido sin efectos', async () => {
+    const store = storeBase();
+    agregarPedidoConItems(store, pedidoBase({ estado: 'cotizando' }));
+    store.quoteRequests.push(quoteRequestBase());
+    const ctx = crearFakeCtx(store, actorAdminMateriales, AHORA);
+
+    const result = await registrarCotizacion({
+      quoteRequestId: 'quote-request-1',
+      fuente: 'texto',
+      confianzaExtraccion: 0.95,
+      items: [{ pedidoItemId: 'item-ajeno', precioUnitario: 1, cantidad: 1 }],
+    }, ctx);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('No debia registrar cotizacion.');
+    expect(result.error.codigo).toBe('validacion');
+    expect(store.quoteResponses).toHaveLength(0);
+    expect(store.quoteItems).toHaveLength(0);
+    expect(store.auditEvents).toHaveLength(0);
+  });
+});
+
 describe('runtime fake transaccional', () => {
   it('revierte estado si falla despues de escribir dominio', async () => {
     const store = storeBase();
@@ -534,5 +735,28 @@ describe('runtime fake transaccional', () => {
     expect(store.auditEvents).toHaveLength(0);
     expect(store.approvalEvents).toHaveLength(0);
     expect(store.outboxMessages).toHaveLength(0);
+  });
+
+  it('revierte cotizacion incompleta si falla outbox de repregunta', async () => {
+    const store = storeBase();
+    agregarPedidoConItems(store, pedidoBase({ estado: 'cotizando' }));
+    store.quoteRequests.push(quoteRequestBase());
+    store.failOutbox = true;
+
+    await expect(
+      withFakeCtx(store, actorAdminMateriales, AHORA, async (ctx) => registrarCotizacion({
+        quoteRequestId: 'quote-request-1',
+        fuente: 'texto',
+        confianzaExtraccion: 0.5,
+        items: [],
+      }, ctx)),
+    ).rejects.toThrow('Fallo de outbox fake.');
+
+    expect(store.quoteResponses).toHaveLength(0);
+    expect(store.quoteItems).toHaveLength(0);
+    expect(store.reviewQueue).toHaveLength(0);
+    expect(store.auditEvents).toHaveLength(0);
+    expect(store.outboxMessages).toHaveLength(0);
+    expect(store.quoteRequests[0]?.estado).toBe('enviada');
   });
 });

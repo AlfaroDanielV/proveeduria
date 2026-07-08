@@ -35,8 +35,8 @@ Contrato de cada herramienta expuesta al agente Claude. Reglas transversales:
 
 ### `registrar_cotizacion`
 - **Contexto**: mensaje de proveedor (o reenvío manual de Proveeduría — E2/adopción).
-- **Input**: quote_request_id (resuelto por remitente + pedido activo), fuente (texto/imagen/pdf/audio → extractor correspondiente).
-- **Efecto**: `quote_response` + `quote_items` con `confianza_extraccion`; si incompleta → E2 (repregunta, máx 2). Cuando todas responden o vence plazo → `cotizando→en_revision` y se genera el comparativo.
+- **Input**: quote_request_id (resuelto por remitente + pedido activo), fuente (texto/imagen/pdf/audio → extractor correspondiente), condiciones?, plazo_entrega?, confianza_extraccion, items[{pedido_item_id?, precio_unitario?, cantidad?, disponible?, notas?}]. La tool recibe el resultado estructurado del extractor/router; no hace OCR/LLM.
+- **Efecto**: `quote_response` + `quote_items` con `confianza_extraccion`; si incompleta → E2 (repregunta por outbox, máx 2; al tercer fallo escala a `review_queue`). Cuando todas responden completas o vence plazo → `cotizando→en_revision` y se genera el comparativo.
 
 ### `generar_comparativo`
 - **Roles**: admin_materiales, superadmin, gerencia (lectura).

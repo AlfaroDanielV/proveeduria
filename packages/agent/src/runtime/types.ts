@@ -2,10 +2,14 @@ import type {
   CanalAprobacion,
   CodigoExcepcion,
   EstadoPedido,
+  EstadoQuoteResponse,
+  FuenteExtraccion,
   OrigenAudit,
   Result,
   Rol,
   TipoAprobacion,
+  TipoReviewQueue,
+  UmbralesConfig,
 } from '@proveeduria/core';
 
 export interface Actor {
@@ -98,6 +102,7 @@ export interface PedidoRepo {
     confirmadoPor: string,
   ): Promise<Pedido>;
   marcarCotizando(pedidoId: string, plazoCotizacionAt: Date): Promise<Pedido>;
+  marcarEnRevision(pedidoId: string): Promise<Pedido>;
 }
 
 export interface PedidoItemRepo {
@@ -151,6 +156,78 @@ export interface NuevoQuoteRequest {
 
 export interface QuoteRequestRepo {
   crear(input: NuevoQuoteRequest): Promise<QuoteRequest>;
+  bloquearPorId(quoteRequestId: string): Promise<QuoteRequest | null>;
+  marcarRespondida(quoteRequestId: string): Promise<QuoteRequest>;
+  contarPendientesPorPedido(pedidoId: string): Promise<number>;
+}
+
+export interface QuoteResponse {
+  readonly id: string;
+  readonly quoteRequestId: string;
+  readonly recibidoAt: Date;
+  readonly fuente: FuenteExtraccion;
+  readonly condiciones: string | null;
+  readonly plazoEntrega: string | null;
+  readonly confianzaExtraccion: number;
+  readonly estado: EstadoQuoteResponse;
+  readonly intentosRepregunta: number;
+}
+
+export interface NuevoQuoteResponse {
+  readonly quoteRequestId: string;
+  readonly recibidoAt: Date;
+  readonly fuente: FuenteExtraccion;
+  readonly condiciones: string | null;
+  readonly plazoEntrega: string | null;
+  readonly confianzaExtraccion: number;
+  readonly estado: EstadoQuoteResponse;
+  readonly intentosRepregunta: number;
+}
+
+export interface QuoteItemInput {
+  readonly pedidoItemId: string | null;
+  readonly precioUnitario: number | null;
+  readonly cantidad: number | null;
+  readonly disponible: boolean | null;
+  readonly notas: string | null;
+}
+
+export interface QuoteItem extends QuoteItemInput {
+  readonly id: string;
+  readonly quoteResponseId: string;
+}
+
+export interface QuoteResponseRepo {
+  crear(input: NuevoQuoteResponse): Promise<QuoteResponse>;
+  insertarItems(
+    quoteResponseId: string,
+    items: readonly QuoteItemInput[],
+  ): Promise<readonly QuoteItem[]>;
+  contarIncompletas(quoteRequestId: string): Promise<number>;
+}
+
+export interface ReviewQueueEntry {
+  readonly id: string;
+  readonly tipo: TipoReviewQueue;
+  readonly entidad: string;
+  readonly entidadId: string;
+  readonly pedidoId: string | null;
+}
+
+export interface NuevoReviewQueueEntry {
+  readonly tipo: TipoReviewQueue;
+  readonly entidad: string;
+  readonly entidadId: string;
+  readonly pedidoId: string | null;
+  readonly detalle: unknown;
+}
+
+export interface ReviewQueueRepo {
+  crear(input: NuevoReviewQueueEntry): Promise<ReviewQueueEntry>;
+}
+
+export interface ConfigRepo {
+  umbrales(): Promise<UmbralesConfig>;
 }
 
 export interface Repos {
@@ -160,6 +237,9 @@ export interface Repos {
   readonly usuarios: UsuarioRepo;
   readonly proveedores: ProveedorRepo;
   readonly quoteRequests: QuoteRequestRepo;
+  readonly quoteResponses: QuoteResponseRepo;
+  readonly reviewQueue: ReviewQueueRepo;
+  readonly config: ConfigRepo;
 }
 
 export interface AuditEvent {

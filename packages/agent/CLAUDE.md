@@ -1,7 +1,32 @@
 # packages/agent — agente Claude (prompt + tools + extractores)
 
-Contenido de produccion = **Fase 2** (docs/specs/tools.md). En Fase 1 es un stub que
-publica el contrato de nombres de tools y el tipo de contexto del router.
+Contenido de produccion = **Fase 2** (docs/specs/tools.md). Este paquete ya no es solo
+stub: Fase 2a tiene implementado el runtime determinista de tools y el flujo pedido hasta
+cotizaciones registradas / pedido `en_revision`.
+
+## Estado actual Fase 2a
+
+Implementado y verificado con unit tests + integration test contra Postgres efimero:
+
+- `src/runtime/`:
+  - `tx.ts`: `withTx(pool, fn)` con `BEGIN`/`COMMIT`/`ROLLBACK`.
+  - `context.ts`: crea `Ctx` con actor, reloj, repos, audit, outbox, approval.
+  - `repos.ts`: repos PG parametrizados para pedidos, items, usuarios, proveedores,
+    quote requests/responses/items, review queue y config.
+  - `fakes.ts`: fakes transaccionales para tests sin DB.
+- `src/tools/pedido.ts`:
+  - `crearPedido`
+  - `confirmarPedido`
+  - `sugerirProveedores`
+  - `enviarRfq`
+  - `registrarCotizacion`
+
+No implementado aun:
+
+- Router por remitente (interno/proveedor/desconocido) y resolucion de actor real desde el worker.
+- Loop Claude/tool-use y prompt de produccion.
+- Extractores OCR/Vision/audio; `registrarCotizacion` recibe input ya estructurado.
+- `generarComparativo`, portal de pedidos/comparativo, dispatcher real de outbox.
 
 ## Limites (AI_ASSISTED_DEVELOPMENT.md §7 — donde NO delegar sin revision humana)
 

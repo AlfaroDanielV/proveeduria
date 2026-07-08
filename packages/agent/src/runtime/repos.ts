@@ -1,9 +1,13 @@
-import type { Rol } from '@proveeduria/core';
+import { UMBRALES_DEFAULT } from '@proveeduria/core';
+import type { Rol, UmbralesConfig } from '@proveeduria/core';
 import type {
   Actor,
+  ConfigRepo,
   ItemPedidoInput,
   NuevoPedido,
   NuevoQuoteRequest,
+  NuevoQuoteResponse,
+  NuevoReviewQueueEntry,
   Pedido,
   PedidoItem,
   PedidoItemRepo,
@@ -13,9 +17,15 @@ import type {
   Proveedor,
   ProveedorContacto,
   ProveedorRepo,
+  QuoteItem,
+  QuoteItemInput,
   QuoteRequest,
   QuoteRequestRepo,
+  QuoteResponse,
+  QuoteResponseRepo,
   Repos,
+  ReviewQueueEntry,
+  ReviewQueueRepo,
   Tx,
   UsuarioInterno,
   UsuarioRepo,
@@ -74,6 +84,41 @@ interface QuoteRequestRow {
   readonly supplierId: string;
   readonly plazoAt: Date | string;
   readonly estado: QuoteRequest['estado'];
+}
+
+interface QuoteResponseRow {
+  readonly id: string;
+  readonly quoteRequestId: string;
+  readonly recibidoAt: Date | string;
+  readonly fuente: QuoteResponse['fuente'];
+  readonly condiciones: string | null;
+  readonly plazoEntrega: string | null;
+  readonly confianzaExtraccion: number | string;
+  readonly estado: QuoteResponse['estado'];
+  readonly intentosRepregunta: number;
+}
+
+interface QuoteItemRow {
+  readonly id: string;
+  readonly quoteResponseId: string;
+  readonly pedidoItemId: string | null;
+  readonly precioUnitario: number | string | null;
+  readonly cantidad: number | string | null;
+  readonly disponible: boolean | null;
+  readonly notas: string | null;
+}
+
+interface ReviewQueueRow {
+  readonly id: string;
+  readonly tipo: ReviewQueueEntry['tipo'];
+  readonly entidad: string;
+  readonly entidadId: string;
+  readonly pedidoId: string | null;
+}
+
+interface ConfigRow {
+  readonly clave: string;
+  readonly valor: unknown;
 }
 
 function rolesFromRow(value: readonly Rol[] | string): readonly Rol[] {
@@ -173,6 +218,47 @@ function mapQuoteRequest(row: QuoteRequestRow): QuoteRequest {
     plazoAt: dateFromRow(row.plazoAt),
     estado: row.estado,
   };
+}
+
+function mapQuoteResponse(row: QuoteResponseRow): QuoteResponse {
+  return {
+    id: row.id,
+    quoteRequestId: row.quoteRequestId,
+    recibidoAt: dateFromRow(row.recibidoAt),
+    fuente: row.fuente,
+    condiciones: row.condiciones,
+    plazoEntrega: row.plazoEntrega,
+    confianzaExtraccion: Number(row.confianzaExtraccion),
+    estado: row.estado,
+    intentosRepregunta: row.intentosRepregunta,
+  };
+}
+
+function mapQuoteItem(row: QuoteItemRow): QuoteItem {
+  return {
+    id: row.id,
+    quoteResponseId: row.quoteResponseId,
+    pedidoItemId: row.pedidoItemId,
+    precioUnitario: row.precioUnitario === null ? null : Number(row.precioUnitario),
+    cantidad: row.cantidad === null ? null : Number(row.cantidad),
+    disponible: row.disponible,
+    notas: row.notas,
+  };
+}
+
+function mapReviewQueue(row: ReviewQueueRow): ReviewQueueEntry {
+  return {
+    id: row.id,
+    tipo: row.tipo,
+    entidad: row.entidad,
+    entidadId: row.entidadId,
+    pedidoId: row.pedidoId,
+  };
+}
+
+function numberConfig(value: unknown, fallback: number): number {
+  const n = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(n) ? n : fallback;
 }
 
 export class PgProyectoRepo implements ProyectoRepo {
@@ -295,6 +381,22 @@ export class PgPedidoRepo implements PedidoRepo {
     );
     const row = result.rows[0];
     if (row === undefined) throw new Error(`Pedido no encontrado al marcar cotizando: ${pedidoId}.`);
+    return mapPedido(row);
+  }
+
+  async marcarEnRevision(pedidoId: string): Promise<Pedido> {
+    const result = await this.tx.query<PedidoRow>(
+      "UPDATE pedidos SET estado = 'en_revision' " +
+        'WHERE id = $1 ' +
+        'RETURNING id, numero, project_id AS "projectId", ' +
+        'solicitante_user_id AS "solicitanteUserId", estado, ' +
+        'fecha_requerida::text AS "fechaRequerida", urgencia, ' +
+        'confirmado_at AS "confirmadoAt", confirmado_por AS "confirmadoPor", ' +
+        'plazo_cotizacion_at AS "plazoCotizacionAt"',
+      [pedidoId],
+    );
+    const row = result.rows[0];
+    if (row === undefined) throw new Error(`Pedido no encontrado al marcar en_revision: ${pedidoId}.`);
     return mapPedido(row);
   }
 }
@@ -428,6 +530,187 @@ export class PgQuoteRequestRepo implements QuoteRequestRepo {
     if (row === undefined) throw new Error('No se pudo crear quote_request.');
     return mapQuoteRequest(row);
   }
+
+  async bloquearPorId(quoteRequestId: string): Promise<QuoteRequest | null> {
+    const result = await this.tx.query<QuoteRequestRow>(
+      'SELECT id, pedido_id AS "pedidoId", supplier_id AS "supplierId", ' +
+        'plazo_at AS "plazoAt", estado ' +
+        'FROM quote_requests WHERE id = $1 FOR UPDATE',
+      [quoteRequestId],
+    );
+    const row = result.rows[0];
+    return row === undefined ? null : mapQuoteRequest(row);
+  }
+
+  async marcarRespondida(quoteRequestId: string): Promise<QuoteRequest> {
+    const result = await this.tx.query<QuoteRequestRow>(
+      "UPDATE quote_requests SET estado = 'respondida', enviado_at = COALESCE(enviado_at, now()) " +
+        'WHERE id = $1 ' +
+        'RETURNING id, pedido_id AS "pedidoId", supplier_id AS "supplierId", ' +
+        'plazo_at AS "plazoAt", estado',
+      [quoteRequestId],
+    );
+    const row = result.rows[0];
+    if (row === undefined) throw new Error(`Quote request no encontrado: ${quoteRequestId}.`);
+    return mapQuoteRequest(row);
+  }
+
+  async contarPendientesPorPedido(pedidoId: string): Promise<number> {
+    const result = await this.tx.query<{ total: string }>(
+      "SELECT count(*)::text AS total FROM quote_requests WHERE pedido_id = $1 AND estado = 'enviada'",
+      [pedidoId],
+    );
+    return Number(result.rows[0]?.total ?? 0);
+  }
+}
+
+export class PgQuoteResponseRepo implements QuoteResponseRepo {
+  constructor(private readonly tx: Tx) {}
+
+  async crear(input: NuevoQuoteResponse): Promise<QuoteResponse> {
+    const result = await this.tx.query<QuoteResponseRow>(
+      'INSERT INTO quote_responses ' +
+        '(quote_request_id, recibido_at, fuente, condiciones, plazo_entrega, ' +
+        'confianza_extraccion, estado, intentos_repregunta) ' +
+        'VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ' +
+        'RETURNING id, quote_request_id AS "quoteRequestId", recibido_at AS "recibidoAt", ' +
+        'fuente, condiciones, plazo_entrega AS "plazoEntrega", ' +
+        'confianza_extraccion AS "confianzaExtraccion", estado, ' +
+        'intentos_repregunta AS "intentosRepregunta"',
+      [
+        input.quoteRequestId,
+        input.recibidoAt,
+        input.fuente,
+        input.condiciones,
+        input.plazoEntrega,
+        input.confianzaExtraccion,
+        input.estado,
+        input.intentosRepregunta,
+      ],
+    );
+    const row = result.rows[0];
+    if (row === undefined) throw new Error('No se pudo crear quote_response.');
+    return mapQuoteResponse(row);
+  }
+
+  async insertarItems(
+    quoteResponseId: string,
+    items: readonly QuoteItemInput[],
+  ): Promise<readonly QuoteItem[]> {
+    const insertados: QuoteItem[] = [];
+    for (const item of items) {
+      const result = await this.tx.query<QuoteItemRow>(
+        'INSERT INTO quote_items ' +
+          '(quote_response_id, pedido_item_id, precio_unitario, cantidad, disponible, notas) ' +
+          'VALUES ($1, $2, $3, $4, $5, $6) ' +
+          'RETURNING id, quote_response_id AS "quoteResponseId", ' +
+          'pedido_item_id AS "pedidoItemId", precio_unitario AS "precioUnitario", ' +
+          'cantidad, disponible, notas',
+        [
+          quoteResponseId,
+          item.pedidoItemId,
+          item.precioUnitario,
+          item.cantidad,
+          item.disponible,
+          item.notas,
+        ],
+      );
+      const row = result.rows[0];
+      if (row === undefined) throw new Error('No se pudo insertar quote_item.');
+      insertados.push(mapQuoteItem(row));
+    }
+    return insertados;
+  }
+
+  async contarIncompletas(quoteRequestId: string): Promise<number> {
+    const result = await this.tx.query<{ total: string }>(
+      "SELECT count(*)::text AS total FROM quote_responses WHERE quote_request_id = $1 AND estado = 'incompleta'",
+      [quoteRequestId],
+    );
+    return Number(result.rows[0]?.total ?? 0);
+  }
+}
+
+export class PgReviewQueueRepo implements ReviewQueueRepo {
+  constructor(private readonly tx: Tx) {}
+
+  async crear(input: NuevoReviewQueueEntry): Promise<ReviewQueueEntry> {
+    const result = await this.tx.query<ReviewQueueRow>(
+      'INSERT INTO review_queue (tipo, entidad, entidad_id, pedido_id, detalle) ' +
+        'VALUES ($1, $2, $3, $4, $5::jsonb) ' +
+        'RETURNING id, tipo, entidad, entidad_id AS "entidadId", pedido_id AS "pedidoId"',
+      [
+        input.tipo,
+        input.entidad,
+        input.entidadId,
+        input.pedidoId,
+        JSON.stringify(input.detalle ?? null),
+      ],
+    );
+    const row = result.rows[0];
+    if (row === undefined) throw new Error('No se pudo crear review_queue.');
+    return mapReviewQueue(row);
+  }
+}
+
+export class PgConfigRepo implements ConfigRepo {
+  constructor(private readonly tx: Tx) {}
+
+  async umbrales(): Promise<UmbralesConfig> {
+    const result = await this.tx.query<ConfigRow>(
+      'SELECT clave, valor FROM config WHERE clave = ANY($1::text[])',
+      [[
+        'confianza_min_cotizacion',
+        'max_repreguntas_proveedor',
+        'confianza_min_factura',
+        'dif_monto_rel_max',
+        'dif_monto_abs_min_crc',
+        'dif_cantidad_menor',
+        'plazo_cotizacion_horas_default',
+        'horas_atasco_en_revision',
+        'horas_atasco_aprobado',
+      ]],
+    );
+    const byKey = new Map(result.rows.map((row) => [row.clave, row.valor]));
+    return {
+      confianzaMinCotizacion: numberConfig(
+        byKey.get('confianza_min_cotizacion'),
+        UMBRALES_DEFAULT.confianzaMinCotizacion,
+      ),
+      maxRepreguntasProveedor: numberConfig(
+        byKey.get('max_repreguntas_proveedor'),
+        UMBRALES_DEFAULT.maxRepreguntasProveedor,
+      ),
+      confianzaMinFactura: numberConfig(
+        byKey.get('confianza_min_factura'),
+        UMBRALES_DEFAULT.confianzaMinFactura,
+      ),
+      difMontoRelMax: numberConfig(
+        byKey.get('dif_monto_rel_max'),
+        UMBRALES_DEFAULT.difMontoRelMax,
+      ),
+      difMontoAbsMinCRC: numberConfig(
+        byKey.get('dif_monto_abs_min_crc'),
+        UMBRALES_DEFAULT.difMontoAbsMinCRC,
+      ),
+      difCantidadMenor: numberConfig(
+        byKey.get('dif_cantidad_menor'),
+        UMBRALES_DEFAULT.difCantidadMenor,
+      ),
+      plazoCotizacionHorasDefault: numberConfig(
+        byKey.get('plazo_cotizacion_horas_default'),
+        UMBRALES_DEFAULT.plazoCotizacionHorasDefault,
+      ),
+      horasAtascoEnRevision: numberConfig(
+        byKey.get('horas_atasco_en_revision'),
+        UMBRALES_DEFAULT.horasAtascoEnRevision,
+      ),
+      horasAtascoAprobado: numberConfig(
+        byKey.get('horas_atasco_aprobado'),
+        UMBRALES_DEFAULT.horasAtascoAprobado,
+      ),
+    };
+  }
 }
 
 export function crearReposPg(tx: Tx): Repos {
@@ -438,5 +721,8 @@ export function crearReposPg(tx: Tx): Repos {
     usuarios: new PgUsuarioRepo(tx),
     proveedores: new PgProveedorRepo(tx),
     quoteRequests: new PgQuoteRequestRepo(tx),
+    quoteResponses: new PgQuoteResponseRepo(tx),
+    reviewQueue: new PgReviewQueueRepo(tx),
+    config: new PgConfigRepo(tx),
   };
 }

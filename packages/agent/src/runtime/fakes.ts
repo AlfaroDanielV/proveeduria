@@ -1,14 +1,17 @@
-import { formatNumero } from '@proveeduria/core';
-import type { Rol } from '@proveeduria/core';
+import { formatNumero, UMBRALES_DEFAULT } from '@proveeduria/core';
+import type { Rol, UmbralesConfig } from '@proveeduria/core';
 import { crearCtx } from './context.js';
 import type {
   Actor,
   ApprovalEvent,
   AuditEvent,
+  ConfigRepo,
   Ctx,
   ItemPedidoInput,
   NuevoPedido,
   NuevoQuoteRequest,
+  NuevoQuoteResponse,
+  NuevoReviewQueueEntry,
   OutboxMessage,
   Pedido,
   PedidoItem,
@@ -19,9 +22,15 @@ import type {
   Proveedor,
   ProveedorContacto,
   ProveedorRepo,
+  QuoteItem,
+  QuoteItemInput,
   QuoteRequest,
   QuoteRequestRepo,
+  QuoteResponse,
+  QuoteResponseRepo,
   Repos,
+  ReviewQueueEntry,
+  ReviewQueueRepo,
   Tx,
   UsuarioInterno,
   UsuarioRepo,
@@ -45,12 +54,16 @@ interface FakeSnapshot {
   readonly itemsPorPedido: Map<string, PedidoItem[]>;
   readonly proveedores: Map<string, Proveedor>;
   readonly quoteRequests: QuoteRequest[];
+  readonly quoteResponses: QuoteResponse[];
+  readonly quoteItems: QuoteItem[];
+  readonly reviewQueue: ReviewQueueEntry[];
   readonly usuarios: UsuarioInterno[];
   readonly auditEvents: AuditEvent[];
   readonly outboxMessages: OutboxMessage[];
   readonly approvalEvents: ApprovalEvent[];
   readonly pedidoSeq: number;
   readonly idSeq: number;
+  readonly umbrales: UmbralesConfig;
 }
 
 function clonePedido(pedido: Pedido): Pedido {
@@ -102,6 +115,21 @@ function cloneQuoteRequest(quoteRequest: QuoteRequest): QuoteRequest {
   };
 }
 
+function cloneQuoteResponse(quoteResponse: QuoteResponse): QuoteResponse {
+  return {
+    ...quoteResponse,
+    recibidoAt: new Date(quoteResponse.recibidoAt.getTime()),
+  };
+}
+
+function cloneQuoteItem(quoteItem: QuoteItem): QuoteItem {
+  return { ...quoteItem };
+}
+
+function cloneReviewQueue(entry: ReviewQueueEntry): ReviewQueueEntry {
+  return { ...entry };
+}
+
 export class FakeToolStore {
   readonly tx = new FakeTx();
   proyectos = new Map<string, Proyecto>();
@@ -109,12 +137,16 @@ export class FakeToolStore {
   itemsPorPedido = new Map<string, PedidoItem[]>();
   proveedores = new Map<string, Proveedor>();
   quoteRequests: QuoteRequest[] = [];
+  quoteResponses: QuoteResponse[] = [];
+  quoteItems: QuoteItem[] = [];
+  reviewQueue: ReviewQueueEntry[] = [];
   usuarios: UsuarioInterno[] = [];
   auditEvents: AuditEvent[] = [];
   outboxMessages: OutboxMessage[] = [];
   approvalEvents: ApprovalEvent[] = [];
   pedidoSeq = 1;
   idSeq = 1;
+  umbrales: UmbralesConfig = { ...UMBRALES_DEFAULT };
   failAudit = false;
   failOutbox = false;
   failApproval = false;
@@ -152,12 +184,16 @@ export class FakeToolStore {
         ]),
       ),
       quoteRequests: this.quoteRequests.map(cloneQuoteRequest),
+      quoteResponses: this.quoteResponses.map(cloneQuoteResponse),
+      quoteItems: this.quoteItems.map(cloneQuoteItem),
+      reviewQueue: this.reviewQueue.map(cloneReviewQueue),
       usuarios: this.usuarios.map(cloneUsuario),
       auditEvents: this.auditEvents.map((event) => ({ ...event })),
       outboxMessages: this.outboxMessages.map((message) => ({ ...message })),
       approvalEvents: this.approvalEvents.map((event) => ({ ...event })),
       pedidoSeq: this.pedidoSeq,
       idSeq: this.idSeq,
+      umbrales: { ...this.umbrales },
     };
   }
 
@@ -167,12 +203,16 @@ export class FakeToolStore {
     this.itemsPorPedido = snapshot.itemsPorPedido;
     this.proveedores = snapshot.proveedores;
     this.quoteRequests = snapshot.quoteRequests;
+    this.quoteResponses = snapshot.quoteResponses;
+    this.quoteItems = snapshot.quoteItems;
+    this.reviewQueue = snapshot.reviewQueue;
     this.usuarios = snapshot.usuarios;
     this.auditEvents = snapshot.auditEvents;
     this.outboxMessages = snapshot.outboxMessages;
     this.approvalEvents = snapshot.approvalEvents;
     this.pedidoSeq = snapshot.pedidoSeq;
     this.idSeq = snapshot.idSeq;
+    this.umbrales = snapshot.umbrales;
   }
 
   nextId(prefix: string): string {
@@ -255,6 +295,17 @@ class FakePedidoRepo implements PedidoRepo {
       ...pedido,
       estado: 'cotizando',
       plazoCotizacionAt: new Date(plazoCotizacionAt.getTime()),
+    };
+    this.store.pedidos.set(pedidoId, clonePedido(actualizado));
+    return clonePedido(actualizado);
+  }
+
+  async marcarEnRevision(pedidoId: string): Promise<Pedido> {
+    const pedido = this.store.pedidos.get(pedidoId);
+    if (pedido === undefined) throw new Error(`Pedido no encontrado: ${pedidoId}.`);
+    const actualizado: Pedido = {
+      ...pedido,
+      estado: 'en_revision',
     };
     this.store.pedidos.set(pedidoId, clonePedido(actualizado));
     return clonePedido(actualizado);
@@ -348,6 +399,96 @@ class FakeQuoteRequestRepo implements QuoteRequestRepo {
     this.store.quoteRequests.push(cloneQuoteRequest(quoteRequest));
     return cloneQuoteRequest(quoteRequest);
   }
+
+  async bloquearPorId(quoteRequestId: string): Promise<QuoteRequest | null> {
+    const quoteRequest = this.store.quoteRequests.find((qr) => qr.id === quoteRequestId);
+    return quoteRequest === undefined ? null : cloneQuoteRequest(quoteRequest);
+  }
+
+  async marcarRespondida(quoteRequestId: string): Promise<QuoteRequest> {
+    const index = this.store.quoteRequests.findIndex((qr) => qr.id === quoteRequestId);
+    const quoteRequest = this.store.quoteRequests[index];
+    if (quoteRequest === undefined) throw new Error(`Quote request no encontrado: ${quoteRequestId}.`);
+    const actualizado: QuoteRequest = {
+      ...quoteRequest,
+      estado: 'respondida',
+    };
+    this.store.quoteRequests[index] = cloneQuoteRequest(actualizado);
+    return cloneQuoteRequest(actualizado);
+  }
+
+  async contarPendientesPorPedido(pedidoId: string): Promise<number> {
+    return this.store.quoteRequests.filter((qr) => (
+      qr.pedidoId === pedidoId && qr.estado === 'enviada'
+    )).length;
+  }
+}
+
+class FakeQuoteResponseRepo implements QuoteResponseRepo {
+  constructor(private readonly store: FakeToolStore) {}
+
+  async crear(input: NuevoQuoteResponse): Promise<QuoteResponse> {
+    const quoteResponse: QuoteResponse = {
+      id: this.store.nextId('quote-response'),
+      quoteRequestId: input.quoteRequestId,
+      recibidoAt: new Date(input.recibidoAt.getTime()),
+      fuente: input.fuente,
+      condiciones: input.condiciones,
+      plazoEntrega: input.plazoEntrega,
+      confianzaExtraccion: input.confianzaExtraccion,
+      estado: input.estado,
+      intentosRepregunta: input.intentosRepregunta,
+    };
+    this.store.quoteResponses.push(cloneQuoteResponse(quoteResponse));
+    return cloneQuoteResponse(quoteResponse);
+  }
+
+  async insertarItems(
+    quoteResponseId: string,
+    items: readonly QuoteItemInput[],
+  ): Promise<readonly QuoteItem[]> {
+    const insertados = items.map((item) => ({
+      id: this.store.nextId('quote-item'),
+      quoteResponseId,
+      pedidoItemId: item.pedidoItemId,
+      precioUnitario: item.precioUnitario,
+      cantidad: item.cantidad,
+      disponible: item.disponible,
+      notas: item.notas,
+    }));
+    this.store.quoteItems.push(...insertados.map(cloneQuoteItem));
+    return insertados.map(cloneQuoteItem);
+  }
+
+  async contarIncompletas(quoteRequestId: string): Promise<number> {
+    return this.store.quoteResponses.filter((qr) => (
+      qr.quoteRequestId === quoteRequestId && qr.estado === 'incompleta'
+    )).length;
+  }
+}
+
+class FakeReviewQueueRepo implements ReviewQueueRepo {
+  constructor(private readonly store: FakeToolStore) {}
+
+  async crear(input: NuevoReviewQueueEntry): Promise<ReviewQueueEntry> {
+    const entry: ReviewQueueEntry = {
+      id: this.store.nextId('review'),
+      tipo: input.tipo,
+      entidad: input.entidad,
+      entidadId: input.entidadId,
+      pedidoId: input.pedidoId,
+    };
+    this.store.reviewQueue.push(cloneReviewQueue(entry));
+    return cloneReviewQueue(entry);
+  }
+}
+
+class FakeConfigRepo implements ConfigRepo {
+  constructor(private readonly store: FakeToolStore) {}
+
+  async umbrales(): Promise<UmbralesConfig> {
+    return { ...this.store.umbrales };
+  }
 }
 
 export function crearFakeRepos(store: FakeToolStore): Repos {
@@ -358,6 +499,9 @@ export function crearFakeRepos(store: FakeToolStore): Repos {
     usuarios: new FakeUsuarioRepo(store),
     proveedores: new FakeProveedorRepo(store),
     quoteRequests: new FakeQuoteRequestRepo(store),
+    quoteResponses: new FakeQuoteResponseRepo(store),
+    reviewQueue: new FakeReviewQueueRepo(store),
+    config: new FakeConfigRepo(store),
   };
 }
 

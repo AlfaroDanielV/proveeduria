@@ -1,7 +1,13 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { Pool } from 'pg';
 
-import { confirmarPedido, crearPedido, enviarRfq, sugerirProveedores } from './pedido.js';
+import {
+  confirmarPedido,
+  crearPedido,
+  enviarRfq,
+  registrarCotizacion,
+  sugerirProveedores,
+} from './pedido.js';
 import { crearCtx } from '../runtime/context.js';
 import { withTx } from '../runtime/tx.js';
 import type { Actor } from '../runtime/types.js';
@@ -32,6 +38,7 @@ describeIntegration('pedido tools con Postgres real', () => {
   it('crea, confirma, sugiere proveedores y envia RFQ en base real', async () => {
     const ahora = new Date('2026-07-07T12:00:00.000Z');
     let pedidoId = '';
+    let quoteRequestIds: string[] = [];
 
     await withTx(pool, async (tx) => {
       const ctx = crearCtx({ tx, actor: actorIngeniero, ahora });
@@ -87,6 +94,47 @@ describeIntegration('pedido tools con Postgres real', () => {
       expect(result.value.estado).toBe('cotizando');
       expect(result.value.quoteRequests).toHaveLength(2);
       expect(result.value.outbox).toBe(2);
+      quoteRequestIds = result.value.quoteRequests.map((qr) => qr.id);
+    });
+
+    await withTx(pool, async (tx) => {
+      const ctx = crearCtx({ tx, actor: actorAdminMateriales, ahora });
+      const result = await registrarCotizacion({
+        quoteRequestId: quoteRequestIds[0],
+        fuente: 'texto',
+        condiciones: 'Contado',
+        plazoEntrega: '2 dias',
+        confianzaExtraccion: 0.95,
+        items: [
+          { precioUnitario: 4500, cantidad: 10, disponible: true },
+          { precioUnitario: 1200, cantidad: 25, disponible: true },
+        ],
+      }, ctx);
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error(result.error.mensaje);
+      expect(result.value.pedidoEstado).toBe('cotizando');
+      expect(result.value.transicionoAEnRevision).toBe(false);
+    });
+
+    await withTx(pool, async (tx) => {
+      const ctx = crearCtx({ tx, actor: actorAdminMateriales, ahora });
+      const result = await registrarCotizacion({
+        quoteRequestId: quoteRequestIds[1],
+        fuente: 'texto',
+        condiciones: 'Credito 30 dias',
+        plazoEntrega: '3 dias',
+        confianzaExtraccion: 0.9,
+        items: [
+          { precioUnitario: 4600, cantidad: 10, disponible: true },
+          { precioUnitario: 1250, cantidad: 25, disponible: true },
+        ],
+      }, ctx);
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error(result.error.mensaje);
+      expect(result.value.pedidoEstado).toBe('en_revision');
+      expect(result.value.transicionoAEnRevision).toBe(true);
     });
 
     const check = await pool.query<{
@@ -95,6 +143,8 @@ describeIntegration('pedido tools con Postgres real', () => {
       confirmadoPor: string | null;
       itemCount: string;
       quoteRequestCount: string;
+      quoteResponseCount: string;
+      quoteItemCount: string;
       auditCount: string;
       approvalCount: string;
       internalOutboxCount: string;
@@ -103,6 +153,13 @@ describeIntegration('pedido tools con Postgres real', () => {
       'SELECT p.numero, p.estado, p.confirmado_por AS "confirmadoPor", ' +
         '(SELECT count(*) FROM pedido_items pi WHERE pi.pedido_id = p.id) AS "itemCount", ' +
         '(SELECT count(*) FROM quote_requests qr WHERE qr.pedido_id = p.id) AS "quoteRequestCount", ' +
+        '(SELECT count(*) FROM quote_responses qres ' +
+        'JOIN quote_requests qr ON qr.id = qres.quote_request_id ' +
+        'WHERE qr.pedido_id = p.id) AS "quoteResponseCount", ' +
+        '(SELECT count(*) FROM quote_items qi ' +
+        'JOIN quote_responses qres ON qres.id = qi.quote_response_id ' +
+        'JOIN quote_requests qr ON qr.id = qres.quote_request_id ' +
+        'WHERE qr.pedido_id = p.id) AS "quoteItemCount", ' +
         '(SELECT count(*) FROM audit_events ae WHERE ae.pedido_id = p.id) AS "auditCount", ' +
         '(SELECT count(*) FROM approval_events ap WHERE ap.pedido_id = p.id) AS "approvalCount", ' +
         "(SELECT count(*) FROM outbox_messages om WHERE om.template = 'notificacion_interna' " +
@@ -114,13 +171,15 @@ describeIntegration('pedido tools con Postgres real', () => {
     );
 
     expect(check.rows[0]).toMatchObject({
-      estado: 'cotizando',
+      estado: 'en_revision',
       confirmadoPor: actorIngeniero.userId,
     });
     expect(check.rows[0]?.numero).toMatch(/^PED-2026-\d{3,}$/);
     expect(Number(check.rows[0]?.itemCount)).toBe(2);
     expect(Number(check.rows[0]?.quoteRequestCount)).toBe(2);
-    expect(Number(check.rows[0]?.auditCount)).toBe(4);
+    expect(Number(check.rows[0]?.quoteResponseCount)).toBe(2);
+    expect(Number(check.rows[0]?.quoteItemCount)).toBe(4);
+    expect(Number(check.rows[0]?.auditCount)).toBe(6);
     expect(Number(check.rows[0]?.approvalCount)).toBe(1);
     expect(Number(check.rows[0]?.internalOutboxCount)).toBe(1);
     expect(Number(check.rows[0]?.rfqOutboxCount)).toBe(2);

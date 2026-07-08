@@ -21,11 +21,32 @@ The production system is being built as an npm-workspaces monorepo alongside the
 
 - `packages/core` — pure domain: state machine, correlative numbering, roles/permissions, approval policy, deterministic exception rules. No IO; time passed as a param; returns `Result<T,E>`. **Protected code** (AI_ASSISTED_DEVELOPMENT.md §2): update the spec first, keep tests exhaustive. `packages/core/src/types.ts` is the frozen domain type contract everything imports.
 - `packages/db` — versioned plain-SQL migrations (`migrations/NNN_*.sql`) + idempotent seeds, applied by `scripts/migrate.mjs` (replaces manual Supabase SQL). Enforces append-only `audit_events` (row + statement/TRUNCATE triggers), the pedido transition trigger, correlative sequences, `wamid` uniqueness.
-- `packages/agent` — Fase 2 stub (agent prompt / tools / extractors).
+- `packages/agent` — Fase 2a en progreso. Ya contiene runtime de tools deterministas
+  (`withTx`, repos PG/fakes, audit, outbox, approval) y las tools de pedido/RFQ/cotizacion:
+  `crearPedido`, `confirmarPedido`, `sugerirProveedores`, `enviarRfq`, `registrarCotizacion`.
+  Aun faltan router/loop Claude, extractores reales, comparativo, portal de pedidos y wiring
+  del worker.
 - `apps/api` — production-safe webhook ingest: verify `X-Hub-Signature-256` → dedup by `wamid` → persist → enqueue → 200; fail-closed (missing secret or prod-without-queue refuses to start).
 - `apps/worker` — queue-consumer stub (domain engine is Fase 2).
 
 Commands (root): `npm install`; `npm run build:all`; `npm run typecheck`; `npm run test:all`; `DATABASE_URL=… npm run migrate && npm run seed`. CI is `.github/workflows/ci.yml` (build + typecheck + tests, plus an ephemeral-Postgres migration gate) — separate from the legacy Azure deploy workflows.
+
+## Current implementation status
+
+As of the latest Fase 2a work, the deterministic tool layer can execute the pedido path up
+to `en_revision` in tests against real Postgres:
+
+1. `crearPedido` creates `pedidos`/`pedido_items` in `borrador` with PED numbering.
+2. `confirmarPedido` sets `confirmado_at`/`confirmado_por` and notifies Proveeduria.
+3. `sugerirProveedores` returns an editable supplier ranking using active opt-in contacts.
+4. `enviarRfq` writes `approval_events(lista_proveedores)`, `quote_requests`, RFQ outbox
+   messages, and transitions `borrador -> cotizando`.
+5. `registrarCotizacion` writes `quote_responses`/`quote_items`, handles E2 repregunta or
+   review escalation, and transitions `cotizando -> en_revision` when all RFQs responded.
+
+The integrated worker route from inbound WhatsApp job to these tools is not wired yet.
+For navigation and future sessions, read `docs/CODEBASE_GUIDE.md` and
+`docs/handoff/FASE2A-current-status.md` before continuing.
 
 ## Commands
 
