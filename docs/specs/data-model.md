@@ -25,6 +25,7 @@ Convenciones: snake_case, PK `id uuid default gen_random_uuid()`, timestamps `cr
 - `quote_requests` — pedido_id, supplier_id, enviado_at (via outbox), plazo_at, estado: `enviada|respondida|vencida|declinada`.
 - `quote_responses` — quote_request_id, recibido_at, fuente (`texto|imagen|pdf|audio`), attachment_id, condiciones, plazo_entrega, confianza_extraccion numeric(3,2), estado: `completa|incompleta|descartada`.
 - `quote_items` — quote_response_id, pedido_item_id (nullable si el proveedor cotizó algo no pedido), precio_unitario, cantidad, disponible boolean, notas.
+- **Comparativo de cotizaciones** — no es tabla en Fase 2a: se calcula determinísticamente desde `pedido_items`, `quote_requests`, la última `quote_response` completa por proveedor y sus `quote_items`. El resultado se audita y se puede enviar por `outbox`; snapshots inmutables requerirán migración nueva antes de implementarse.
 
 ## Compra y recepción
 

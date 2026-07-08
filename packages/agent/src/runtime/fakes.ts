@@ -5,6 +5,8 @@ import type {
   Actor,
   ApprovalEvent,
   AuditEvent,
+  ComparativoCotizacionFila,
+  ComparativoRepo,
   ConfigRepo,
   Ctx,
   ItemPedidoInput,
@@ -467,6 +469,84 @@ class FakeQuoteResponseRepo implements QuoteResponseRepo {
   }
 }
 
+function subtotalComparativo(
+  item: PedidoItem,
+  quoteItem: QuoteItem | undefined,
+): { subtotal: number | null; faltante: boolean } {
+  if (
+    quoteItem === undefined ||
+    quoteItem.precioUnitario === null ||
+    quoteItem.cantidad === null ||
+    quoteItem.cantidad < item.cantidad ||
+    quoteItem.disponible === false
+  ) {
+    return {
+      subtotal:
+        quoteItem?.precioUnitario === null ||
+        quoteItem?.cantidad === null ||
+        quoteItem?.precioUnitario === undefined ||
+        quoteItem?.cantidad === undefined ||
+        quoteItem?.disponible === false
+          ? null
+          : quoteItem.precioUnitario * quoteItem.cantidad,
+      faltante: true,
+    };
+  }
+
+  return {
+    subtotal: quoteItem.precioUnitario * quoteItem.cantidad,
+    faltante: false,
+  };
+}
+
+class FakeComparativoRepo implements ComparativoRepo {
+  constructor(private readonly store: FakeToolStore) {}
+
+  async porPedido(pedidoId: string): Promise<readonly ComparativoCotizacionFila[]> {
+    const items = this.store.itemsPorPedido.get(pedidoId) ?? [];
+    const quoteRequests = this.store.quoteRequests.filter((qr) => qr.pedidoId === pedidoId);
+    const filas: ComparativoCotizacionFila[] = [];
+
+    for (const item of items) {
+      for (const quoteRequest of quoteRequests) {
+        const proveedor = this.store.proveedores.get(quoteRequest.supplierId);
+        const quoteResponse = [...this.store.quoteResponses].reverse().find((response) => (
+          response.quoteRequestId === quoteRequest.id && response.estado === 'completa'
+        ));
+        const quoteItem = quoteResponse === undefined
+          ? undefined
+          : this.store.quoteItems.find((itemCotizado) => (
+            itemCotizado.quoteResponseId === quoteResponse.id &&
+            itemCotizado.pedidoItemId === item.id
+          ));
+        const subtotal = subtotalComparativo(item, quoteItem);
+
+        filas.push({
+          pedidoItemId: item.id,
+          descripcion: item.descripcion,
+          cantidadSolicitada: item.cantidad,
+          unidad: item.unidad,
+          supplierId: quoteRequest.supplierId,
+          proveedor: proveedor?.nombre ?? quoteRequest.supplierId,
+          quoteRequestId: quoteRequest.id,
+          quoteRequestEstado: quoteRequest.estado,
+          quoteResponseId: quoteResponse?.id ?? null,
+          precioUnitario: quoteItem?.precioUnitario ?? null,
+          cantidadCotizada: quoteItem?.cantidad ?? null,
+          disponible: quoteItem?.disponible ?? null,
+          condiciones: quoteResponse?.condiciones ?? null,
+          plazoEntrega: quoteResponse?.plazoEntrega ?? null,
+          subtotal: subtotal.subtotal,
+          faltante: subtotal.faltante,
+          notas: quoteItem?.notas ?? null,
+        });
+      }
+    }
+
+    return filas;
+  }
+}
+
 class FakeReviewQueueRepo implements ReviewQueueRepo {
   constructor(private readonly store: FakeToolStore) {}
 
@@ -500,6 +580,7 @@ export function crearFakeRepos(store: FakeToolStore): Repos {
     proveedores: new FakeProveedorRepo(store),
     quoteRequests: new FakeQuoteRequestRepo(store),
     quoteResponses: new FakeQuoteResponseRepo(store),
+    comparativos: new FakeComparativoRepo(store),
     reviewQueue: new FakeReviewQueueRepo(store),
     config: new FakeConfigRepo(store),
   };

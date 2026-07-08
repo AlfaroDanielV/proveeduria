@@ -2,6 +2,8 @@ import { UMBRALES_DEFAULT } from '@proveeduria/core';
 import type { Rol, UmbralesConfig } from '@proveeduria/core';
 import type {
   Actor,
+  ComparativoCotizacionFila,
+  ComparativoRepo,
   ConfigRepo,
   ItemPedidoInput,
   NuevoPedido,
@@ -105,6 +107,26 @@ interface QuoteItemRow {
   readonly precioUnitario: number | string | null;
   readonly cantidad: number | string | null;
   readonly disponible: boolean | null;
+  readonly notas: string | null;
+}
+
+interface ComparativoCotizacionRow {
+  readonly pedidoItemId: string;
+  readonly descripcion: string;
+  readonly cantidadSolicitada: number | string;
+  readonly unidad: string;
+  readonly supplierId: string;
+  readonly proveedor: string;
+  readonly quoteRequestId: string;
+  readonly quoteRequestEstado: QuoteRequest['estado'];
+  readonly quoteResponseId: string | null;
+  readonly precioUnitario: number | string | null;
+  readonly cantidadCotizada: number | string | null;
+  readonly disponible: boolean | null;
+  readonly condiciones: string | null;
+  readonly plazoEntrega: string | null;
+  readonly subtotal: number | string | null;
+  readonly faltante: boolean;
   readonly notas: string | null;
 }
 
@@ -242,6 +264,28 @@ function mapQuoteItem(row: QuoteItemRow): QuoteItem {
     precioUnitario: row.precioUnitario === null ? null : Number(row.precioUnitario),
     cantidad: row.cantidad === null ? null : Number(row.cantidad),
     disponible: row.disponible,
+    notas: row.notas,
+  };
+}
+
+function mapComparativoCotizacion(row: ComparativoCotizacionRow): ComparativoCotizacionFila {
+  return {
+    pedidoItemId: row.pedidoItemId,
+    descripcion: row.descripcion,
+    cantidadSolicitada: Number(row.cantidadSolicitada),
+    unidad: row.unidad,
+    supplierId: row.supplierId,
+    proveedor: row.proveedor,
+    quoteRequestId: row.quoteRequestId,
+    quoteRequestEstado: row.quoteRequestEstado,
+    quoteResponseId: row.quoteResponseId,
+    precioUnitario: row.precioUnitario === null ? null : Number(row.precioUnitario),
+    cantidadCotizada: row.cantidadCotizada === null ? null : Number(row.cantidadCotizada),
+    disponible: row.disponible,
+    condiciones: row.condiciones,
+    plazoEntrega: row.plazoEntrega,
+    subtotal: row.subtotal === null ? null : Number(row.subtotal),
+    faltante: row.faltante,
     notas: row.notas,
   };
 }
@@ -631,6 +675,55 @@ export class PgQuoteResponseRepo implements QuoteResponseRepo {
   }
 }
 
+export class PgComparativoRepo implements ComparativoRepo {
+  constructor(private readonly tx: Tx) {}
+
+  async porPedido(pedidoId: string): Promise<readonly ComparativoCotizacionFila[]> {
+    const result = await this.tx.query<ComparativoCotizacionRow>(
+      'WITH rfqs AS ( ' +
+        'SELECT qr.id, qr.pedido_id, qr.supplier_id, qr.estado, s.nombre AS proveedor, ' +
+        'qres.id AS quote_response_id, qres.condiciones, qres.plazo_entrega ' +
+        'FROM quote_requests qr ' +
+        'JOIN suppliers s ON s.id = qr.supplier_id ' +
+        'LEFT JOIN LATERAL ( ' +
+        'SELECT id, condiciones, plazo_entrega ' +
+        'FROM quote_responses ' +
+        "WHERE quote_request_id = qr.id AND estado = 'completa' " +
+        'ORDER BY recibido_at DESC NULLS LAST, created_at DESC, id DESC ' +
+        'LIMIT 1 ' +
+        ') qres ON true ' +
+        'WHERE qr.pedido_id = $1 ' +
+        ') ' +
+        'SELECT pi.id AS "pedidoItemId", pi.descripcion, ' +
+        'pi.cantidad::float8 AS "cantidadSolicitada", COALESCE(pi.unidad, \'\') AS unidad, ' +
+        'rfqs.supplier_id AS "supplierId", rfqs.proveedor, ' +
+        'rfqs.id AS "quoteRequestId", rfqs.estado AS "quoteRequestEstado", ' +
+        'rfqs.quote_response_id AS "quoteResponseId", ' +
+        'qi.precio_unitario::float8 AS "precioUnitario", ' +
+        'qi.cantidad::float8 AS "cantidadCotizada", qi.disponible, ' +
+        'rfqs.condiciones, rfqs.plazo_entrega AS "plazoEntrega", ' +
+        'CASE WHEN qi.precio_unitario IS NULL OR qi.cantidad IS NULL OR qi.disponible IS FALSE ' +
+        'THEN NULL ELSE (qi.precio_unitario * qi.cantidad)::float8 END AS subtotal, ' +
+        '(rfqs.quote_response_id IS NULL OR qi.id IS NULL OR qi.precio_unitario IS NULL ' +
+        'OR qi.cantidad IS NULL OR qi.cantidad < pi.cantidad OR qi.disponible IS FALSE) AS faltante, ' +
+        'qi.notas ' +
+        'FROM pedido_items pi ' +
+        'JOIN rfqs ON rfqs.pedido_id = pi.pedido_id ' +
+        'LEFT JOIN LATERAL ( ' +
+        'SELECT id, precio_unitario, cantidad, disponible, notas ' +
+        'FROM quote_items ' +
+        'WHERE quote_response_id = rfqs.quote_response_id AND pedido_item_id = pi.id ' +
+        'ORDER BY created_at ASC, id ASC ' +
+        'LIMIT 1 ' +
+        ') qi ON true ' +
+        'WHERE pi.pedido_id = $1 ' +
+        'ORDER BY pi.created_at ASC, pi.id ASC, rfqs.proveedor ASC, rfqs.id ASC',
+      [pedidoId],
+    );
+    return result.rows.map(mapComparativoCotizacion);
+  }
+}
+
 export class PgReviewQueueRepo implements ReviewQueueRepo {
   constructor(private readonly tx: Tx) {}
 
@@ -722,6 +815,7 @@ export function crearReposPg(tx: Tx): Repos {
     proveedores: new PgProveedorRepo(tx),
     quoteRequests: new PgQuoteRequestRepo(tx),
     quoteResponses: new PgQuoteResponseRepo(tx),
+    comparativos: new PgComparativoRepo(tx),
     reviewQueue: new PgReviewQueueRepo(tx),
     config: new PgConfigRepo(tx),
   };

@@ -2,7 +2,7 @@
 
 Contenido de produccion = **Fase 2** (docs/specs/tools.md). Este paquete ya no es solo
 stub: Fase 2a tiene implementado el runtime determinista de tools y el flujo pedido hasta
-cotizaciones registradas / pedido `en_revision`.
+cotizaciones registradas / pedido `en_revision` con comparativo generado.
 
 ## Estado actual Fase 2a
 
@@ -20,13 +20,14 @@ Implementado y verificado con unit tests + integration test contra Postgres efim
   - `sugerirProveedores`
   - `enviarRfq`
   - `registrarCotizacion`
+  - `generarComparativo`
 
 No implementado aun:
 
 - Router por remitente (interno/proveedor/desconocido) y resolucion de actor real desde el worker.
 - Loop Claude/tool-use y prompt de produccion.
 - Extractores OCR/Vision/audio; `registrarCotizacion` recibe input ya estructurado.
-- `generarComparativo`, portal de pedidos/comparativo, dispatcher real de outbox.
+- Portal de pedidos/comparativo y dispatcher real de outbox.
 
 ## Limites (AI_ASSISTED_DEVELOPMENT.md §7 — donde NO delegar sin revision humana)
 

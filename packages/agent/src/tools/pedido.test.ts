@@ -4,6 +4,7 @@ import {
   confirmarPedido,
   crearPedido,
   enviarRfq,
+  generarComparativo,
   registrarCotizacion,
   sugerirProveedores,
 } from './pedido.js';
@@ -155,6 +156,25 @@ function quoteResponseIncompleta(id: string): QuoteResponse {
     confianzaExtraccion: 0.5,
     estado: 'incompleta',
     intentosRepregunta: 1,
+  };
+}
+
+function quoteResponseCompleta(
+  id: string,
+  quoteRequestId: string,
+  overrides: Partial<QuoteResponse> = {},
+): QuoteResponse {
+  return {
+    id,
+    quoteRequestId,
+    recibidoAt: AHORA,
+    fuente: 'texto',
+    condiciones: 'Credito 30 dias',
+    plazoEntrega: '2 dias',
+    confianzaExtraccion: 0.95,
+    estado: 'completa',
+    intentosRepregunta: 0,
+    ...overrides,
   };
 }
 
@@ -537,6 +557,185 @@ describe('enviarRfq', () => {
   });
 });
 
+describe('generarComparativo', () => {
+  it('genera matriz item x proveedor, audita y encola notificacion interna', async () => {
+    const store = storeBase();
+    agregarPedidoConItems(store, pedidoBase({ estado: 'en_revision' }));
+    store.quoteRequests.push(
+      quoteRequestBase({
+        id: 'quote-request-1',
+        supplierId: proveedorRodex.id,
+        estado: 'respondida',
+      }),
+      quoteRequestBase({
+        id: 'quote-request-2',
+        supplierId: proveedorLagar.id,
+        estado: 'respondida',
+      }),
+    );
+    store.quoteResponses.push(
+      quoteResponseCompleta('quote-response-1', 'quote-request-1', {
+        condiciones: 'Credito 30 dias',
+        plazoEntrega: '2 dias',
+      }),
+      quoteResponseCompleta('quote-response-2', 'quote-request-2', {
+        condiciones: 'Contado',
+        plazoEntrega: '3 dias',
+      }),
+    );
+    store.quoteItems.push(
+      {
+        id: 'quote-item-1',
+        quoteResponseId: 'quote-response-1',
+        pedidoItemId: 'item-1',
+        precioUnitario: 4500,
+        cantidad: 10,
+        disponible: true,
+        notas: null,
+      },
+      {
+        id: 'quote-item-2',
+        quoteResponseId: 'quote-response-1',
+        pedidoItemId: 'item-2',
+        precioUnitario: 1200,
+        cantidad: 25,
+        disponible: true,
+        notas: null,
+      },
+      {
+        id: 'quote-item-3',
+        quoteResponseId: 'quote-response-2',
+        pedidoItemId: 'item-1',
+        precioUnitario: 4600,
+        cantidad: 10,
+        disponible: true,
+        notas: 'Entrega parcial de otros materiales',
+      },
+    );
+    const ctx = crearFakeCtx(store, actorAdminMateriales, AHORA);
+
+    const result = await generarComparativo({ pedidoId: 'pedido-1' }, ctx);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error.mensaje);
+    expect(result.value).toMatchObject({
+      pedidoId: 'pedido-1',
+      numero: 'PED-2026-001',
+      estado: 'en_revision',
+      portalPath: '/pedidos/pedido-1/comparativo',
+      notificaciones: 1,
+    });
+    expect(result.value.filas).toHaveLength(4);
+    expect(result.value.filas).toEqual([
+      expect.objectContaining({
+        pedidoItemId: 'item-1',
+        proveedor: 'Rodex',
+        precioUnitario: 4500,
+        cantidadCotizada: 10,
+        subtotal: 45000,
+        faltante: false,
+      }),
+      expect.objectContaining({
+        pedidoItemId: 'item-1',
+        proveedor: 'El Lagar',
+        precioUnitario: 4600,
+        cantidadCotizada: 10,
+        subtotal: 46000,
+        faltante: false,
+      }),
+      expect.objectContaining({
+        pedidoItemId: 'item-2',
+        proveedor: 'Rodex',
+        precioUnitario: 1200,
+        cantidadCotizada: 25,
+        subtotal: 30000,
+        faltante: false,
+      }),
+      expect.objectContaining({
+        pedidoItemId: 'item-2',
+        proveedor: 'El Lagar',
+        precioUnitario: null,
+        cantidadCotizada: null,
+        subtotal: null,
+        faltante: true,
+      }),
+    ]);
+    expect(result.value.resumenProveedores).toEqual([
+      {
+        supplierId: proveedorRodex.id,
+        nombre: 'Rodex',
+        quoteRequestId: 'quote-request-1',
+        quoteRequestEstado: 'respondida',
+        quoteResponseId: 'quote-response-1',
+        condiciones: 'Credito 30 dias',
+        plazoEntrega: '2 dias',
+        total: 75000,
+        itemsCotizados: 2,
+        itemsFaltantes: 0,
+      },
+      {
+        supplierId: proveedorLagar.id,
+        nombre: 'El Lagar',
+        quoteRequestId: 'quote-request-2',
+        quoteRequestEstado: 'respondida',
+        quoteResponseId: 'quote-response-2',
+        condiciones: 'Contado',
+        plazoEntrega: '3 dias',
+        total: 46000,
+        itemsCotizados: 1,
+        itemsFaltantes: 1,
+      },
+    ]);
+    expect(store.auditEvents).toHaveLength(1);
+    expect(store.auditEvents[0]).toMatchObject({
+      accion: 'generar_comparativo',
+      entidad: 'pedido',
+      entidadId: 'pedido-1',
+    });
+    expect(store.outboxMessages).toHaveLength(1);
+    expect(store.outboxMessages[0]).toMatchObject({
+      destino: '+50688880002',
+      template: 'notificacion_interna',
+      payload: {
+        variables: [
+          'Jose Pablo',
+          'Comparativo PED-2026-001 listo. Rodex: CRC 75000.00, 0 faltantes; El Lagar: CRC 46000.00, 1 faltantes',
+        ],
+        pedido_id: 'pedido-1',
+        portal_path: '/pedidos/pedido-1/comparativo',
+      },
+    });
+  });
+
+  it('rechaza rol no permitido sin efectos', async () => {
+    const store = storeBase();
+    agregarPedidoConItems(store, pedidoBase({ estado: 'en_revision' }));
+    const ctx = crearFakeCtx(store, actorIngeniero, AHORA);
+
+    const result = await generarComparativo({ pedidoId: 'pedido-1' }, ctx);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('No debia generar comparativo.');
+    expect(result.error.codigo).toBe('rol_insuficiente');
+    expect(store.auditEvents).toHaveLength(0);
+    expect(store.outboxMessages).toHaveLength(0);
+  });
+
+  it('rechaza pedido que aun no esta en_revision sin efectos', async () => {
+    const store = storeBase();
+    agregarPedidoConItems(store, pedidoBase({ estado: 'cotizando' }));
+    const ctx = crearFakeCtx(store, actorAdminMateriales, AHORA);
+
+    const result = await generarComparativo({ pedidoId: 'pedido-1' }, ctx);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('No debia generar comparativo.');
+    expect(result.error.codigo).toBe('E12');
+    expect(store.auditEvents).toHaveLength(0);
+    expect(store.outboxMessages).toHaveLength(0);
+  });
+});
+
 describe('registrarCotizacion', () => {
   it('registra cotizacion completa y transiciona a en_revision si no quedan pendientes', async () => {
     const store = storeBase();
@@ -574,6 +773,27 @@ describe('registrarCotizacion', () => {
       pedidoEstado: 'en_revision',
       transicionoAEnRevision: true,
     });
+    expect(result.value.comparativo).toMatchObject({
+      pedidoId: 'pedido-1',
+      numero: 'PED-2026-001',
+      estado: 'en_revision',
+      notificaciones: 1,
+    });
+    expect(result.value.comparativo?.filas).toHaveLength(2);
+    expect(result.value.comparativo?.resumenProveedores).toEqual([
+      {
+        supplierId: proveedorRodex.id,
+        nombre: 'Rodex',
+        quoteRequestId: 'quote-request-1',
+        quoteRequestEstado: 'respondida',
+        quoteResponseId: result.value.quoteResponse.id,
+        condiciones: 'Credito 30 dias',
+        plazoEntrega: '2 dias',
+        total: 75000,
+        itemsCotizados: 2,
+        itemsFaltantes: 0,
+      },
+    ]);
     expect(store.quoteResponses).toHaveLength(1);
     expect(store.quoteResponses[0]).toMatchObject({
       estado: 'completa',
@@ -582,12 +802,29 @@ describe('registrarCotizacion', () => {
     expect(store.quoteItems).toHaveLength(2);
     expect(store.quoteRequests[0]?.estado).toBe('respondida');
     expect(store.pedidos.get('pedido-1')?.estado).toBe('en_revision');
-    expect(store.auditEvents).toHaveLength(1);
+    expect(store.auditEvents).toHaveLength(2);
     expect(store.auditEvents[0]).toMatchObject({
       accion: 'registrar_cotizacion',
       entidad: 'quote_response',
     });
-    expect(store.outboxMessages).toHaveLength(0);
+    expect(store.auditEvents[1]).toMatchObject({
+      accion: 'generar_comparativo',
+      entidad: 'pedido',
+      entidadId: 'pedido-1',
+    });
+    expect(store.outboxMessages).toHaveLength(1);
+    expect(store.outboxMessages[0]).toMatchObject({
+      destino: '+50688880002',
+      template: 'notificacion_interna',
+      payload: {
+        variables: [
+          'Jose Pablo',
+          'Comparativo PED-2026-001 listo. Rodex: CRC 75000.00, 0 faltantes',
+        ],
+        pedido_id: 'pedido-1',
+        portal_path: '/pedidos/pedido-1/comparativo',
+      },
+    });
   });
 
   it('registra E2 incompleta y encola repregunta al proveedor sin marcar respondida', async () => {

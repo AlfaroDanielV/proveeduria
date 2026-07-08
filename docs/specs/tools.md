@@ -39,8 +39,11 @@ Contrato de cada herramienta expuesta al agente Claude. Reglas transversales:
 - **Efecto**: `quote_response` + `quote_items` con `confianza_extraccion`; si incompleta → E2 (repregunta por outbox, máx 2; al tercer fallo escala a `review_queue`). Cuando todas responden completas o vence plazo → `cotizando→en_revision` y se genera el comparativo.
 
 ### `generar_comparativo`
-- **Roles**: admin_materiales, superadmin, gerencia (lectura).
-- **Efecto**: SQL determinista (sin LLM): tabla ítem×proveedor con precio, plazo, condiciones, subtotales, faltantes marcados. Envía por WhatsApp + enlace al portal.
+- **Roles**: admin_materiales, superadmin. "Gerencia" del PDF se modela como `superadmin` (ver `data-model.md` roles).
+- **Input**: pedido_id.
+- **Guard**: pedido `en_revision`; si el pedido sigue `cotizando`, primero deben completarse/vencerse las RFQs y ejecutarse la transición `cotizando→en_revision`.
+- **Efecto**: SQL determinista (sin LLM): tabla ítem×proveedor calculada desde `pedido_items`, `quote_requests`, la última `quote_response` completa por proveedor y sus `quote_items`. Incluye precio, cantidad cotizada, disponibilidad, plazo, condiciones, subtotales y faltantes marcados (sin respuesta, sin ítem cotizado, precio/cantidad faltante, cantidad menor a la solicitada o `disponible=false`). Registra `audit_event(generar_comparativo)` y encola `notificacion_interna` por `outbox` con resumen compacto y payload de la tabla para WhatsApp/portal.
+- **No hace**: adjudicar ganador, emitir OC ni persistir un snapshot editable. En Fase 2a el portal puede recalcular la misma vista; si más adelante se requiere evidencia inmutable de una adjudicación, se agregará schema específico antes de cambiar este contrato.
 
 ## Adjudicación y OC
 

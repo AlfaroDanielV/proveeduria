@@ -1,13 +1,13 @@
 # Handoff — Fase 2a estado actual
 
-Ultima actualizacion: despues de implementar las tools deterministas de pedido, RFQ y
-registro de cotizaciones en `packages/agent`.
+Ultima actualizacion: despues de implementar `generarComparativo` deterministico en
+`packages/agent`.
 
 ## Estado del proyecto segun `docs/EXECUTION_PLAN.md`
 
 El proyecto esta en **Fase 2a — Prototipo navegable**, pero aun no alcanza el hito completo
-de dia 30. La capa deterministica de tools ya cubre el flujo pedido hasta `en_revision`; falta
-conectarla al worker/router/Claude loop y construir comparativo + portal.
+de dia 30. La capa deterministica de tools ya cubre el flujo pedido hasta `en_revision` con
+comparativo generado; falta conectarla al worker/router/Claude loop y construir el portal.
 
 ## Ya implementado
 
@@ -42,13 +42,24 @@ En `packages/agent/src/tools/pedido.ts`:
     notifica a Proveeduria.
   - Si es completa: marca `quote_requests.estado='respondida'`.
   - Cuando no quedan RFQs pendientes: transiciona `cotizando -> en_revision`.
+  - Al hacer esa transicion, genera el comparativo en la misma transaccion.
+- `generarComparativo`
+  - Valida rol con `puedeUsarTool('generar_comparativo', actor.roles)`.
+  - Exige pedido `en_revision`; si sigue `cotizando` devuelve E12.
+  - Usa repo SQL deterministico para matriz item x proveedor desde `pedido_items`,
+    `quote_requests`, ultima `quote_response` completa por proveedor y `quote_items`.
+  - Devuelve filas con precio, cantidad cotizada, disponibilidad, condiciones, plazo,
+    subtotal y faltantes.
+  - Registra `audit_event(generar_comparativo)` y encola `notificacion_interna` por outbox
+    con resumen compacto, `portal_path` y payload de tabla para WhatsApp/portal.
 
 En `packages/agent/src/runtime/`:
 
-- `types.ts`: contratos `Actor`, `Ctx`, repos, audit/outbox/approval, quotes/review/config.
+- `types.ts`: contratos `Actor`, `Ctx`, repos, audit/outbox/approval, quotes/review/config
+  y comparativos.
 - `tx.ts`: transaccion PG (`BEGIN`/`COMMIT`/`ROLLBACK`).
 - `audit.ts`, `outbox.ts`, `approval.ts`: insertores transaccionales.
-- `repos.ts`: implementaciones PG con SQL parametrizado.
+- `repos.ts`: implementaciones PG con SQL parametrizado, incluido `PgComparativoRepo`.
 - `fakes.ts`: fakes en memoria con snapshot/rollback para unit tests.
 
 En `packages/db/migrations/005_pedidos_confirmacion.sql`:
@@ -69,7 +80,7 @@ Tambien paso un integration test contra Postgres efimero con:
 
 - migraciones `001` a `005`
 - `npm run seed`
-- flujo real `crear -> confirmar -> sugerir -> enviar RFQ -> registrar 2 cotizaciones -> en_revision`
+- flujo real `crear -> confirmar -> sugerir -> enviar RFQ -> registrar 2 cotizaciones -> en_revision -> comparativo`
 
 El test esta en `packages/agent/src/tools/pedido.integration.test.ts` y solo corre si
 `DATABASE_URL` contiene `provee_test`; si no, queda skipped.
@@ -78,19 +89,15 @@ El test esta en `packages/agent/src/tools/pedido.integration.test.ts` y solo cor
 
 Siguiente bloque natural:
 
-1. `generarComparativo`
-   - Debe ser SQL deterministico, no LLM.
-   - Leer `pedido_items`, `quote_requests`, `quote_responses`, `quote_items`.
-   - Producir tabla item x proveedor con precio, cantidad, disponibilidad, condiciones,
-     subtotales y faltantes.
-   - Enviar por `outbox` o devolver estructura para WhatsApp/portal segun spec.
-2. Worker/router
+1. Worker/router
    - Resolver remitente interno/proveedor/desconocido.
    - Crear `Ctx` real con actor, origen, `withTx` y repos PG.
    - Invocar tools desde jobs persistidos de `inbound_messages`.
-3. Claude/tool loop
+2. Claude/tool loop
    - Prompt de produccion lo edita el humano.
    - El agente solo decide tool calls dentro del contrato; permisos y excepciones quedan en tools.
+3. Extractores estructurados
+   - Texto/voz/foto de pedido/cotizacion hacia inputs estrictos de tools.
 4. Portal Fase 2a
    - Lista de pedidos por estado.
    - Detalle de pedido.

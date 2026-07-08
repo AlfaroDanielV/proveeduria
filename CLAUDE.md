@@ -23,9 +23,9 @@ The production system is being built as an npm-workspaces monorepo alongside the
 - `packages/db` — versioned plain-SQL migrations (`migrations/NNN_*.sql`) + idempotent seeds, applied by `scripts/migrate.mjs` (replaces manual Supabase SQL). Enforces append-only `audit_events` (row + statement/TRUNCATE triggers), the pedido transition trigger, correlative sequences, `wamid` uniqueness.
 - `packages/agent` — Fase 2a en progreso. Ya contiene runtime de tools deterministas
   (`withTx`, repos PG/fakes, audit, outbox, approval) y las tools de pedido/RFQ/cotizacion:
-  `crearPedido`, `confirmarPedido`, `sugerirProveedores`, `enviarRfq`, `registrarCotizacion`.
-  Aun faltan router/loop Claude, extractores reales, comparativo, portal de pedidos y wiring
-  del worker.
+  `crearPedido`, `confirmarPedido`, `sugerirProveedores`, `enviarRfq`, `registrarCotizacion`,
+  `generarComparativo`. Aun faltan router/loop Claude, extractores reales, portal de pedidos y
+  wiring del worker.
 - `apps/api` — production-safe webhook ingest: verify `X-Hub-Signature-256` → dedup by `wamid` → persist → enqueue → 200; fail-closed (missing secret or prod-without-queue refuses to start).
 - `apps/worker` — queue-consumer stub (domain engine is Fase 2).
 
@@ -43,6 +43,10 @@ to `en_revision` in tests against real Postgres:
    messages, and transitions `borrador -> cotizando`.
 5. `registrarCotizacion` writes `quote_responses`/`quote_items`, handles E2 repregunta or
    review escalation, and transitions `cotizando -> en_revision` when all RFQs responded.
+6. `generarComparativo` deterministically computes the item x supplier matrix from quote SQL,
+   audits `generar_comparativo`, and enqueues the internal outbox notification. It also runs
+   automatically in the same transaction when the last complete quote moves the pedido to
+   `en_revision`.
 
 The integrated worker route from inbound WhatsApp job to these tools is not wired yet.
 For navigation and future sessions, read `docs/CODEBASE_GUIDE.md` and

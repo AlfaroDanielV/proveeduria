@@ -11,6 +11,7 @@ import type { FuenteExtraccion } from '@proveeduria/core';
 import type {
   Ctx,
   ErrorTool,
+  ComparativoCotizacionFila,
   ItemPedidoInput,
   Pedido,
   PedidoItem,
@@ -111,6 +112,33 @@ export interface RegistrarCotizacionInput {
   readonly items: readonly RegistrarCotizacionItemInput[];
 }
 
+export interface GenerarComparativoInput {
+  readonly pedidoId: string;
+}
+
+export interface ComparativoProveedorResumen {
+  readonly supplierId: string;
+  readonly nombre: string;
+  readonly quoteRequestId: string;
+  readonly quoteRequestEstado: QuoteRequest['estado'];
+  readonly quoteResponseId: string | null;
+  readonly condiciones: string | null;
+  readonly plazoEntrega: string | null;
+  readonly total: number;
+  readonly itemsCotizados: number;
+  readonly itemsFaltantes: number;
+}
+
+export interface ResumenComparativoGenerado {
+  readonly pedidoId: string;
+  readonly numero: string;
+  readonly estado: 'en_revision';
+  readonly filas: readonly ComparativoCotizacionFila[];
+  readonly resumenProveedores: readonly ComparativoProveedorResumen[];
+  readonly portalPath: string;
+  readonly notificaciones: number;
+}
+
 export interface ResumenCotizacionRegistrada {
   readonly quoteRequestId: string;
   readonly quoteResponse: QuoteResponse;
@@ -118,6 +146,7 @@ export interface ResumenCotizacionRegistrada {
   readonly pedidoId: string;
   readonly pedidoEstado: Pedido['estado'];
   readonly transicionoAEnRevision: boolean;
+  readonly comparativo: ResumenComparativoGenerado | null;
 }
 
 const errorRol: ErrorTool = {
@@ -396,6 +425,16 @@ function parseRegistrarCotizacionInput(input: unknown): ResultadoTool<RegistrarC
   return ok(parsed);
 }
 
+function parseGenerarComparativoInput(input: unknown): ResultadoTool<GenerarComparativoInput> {
+  if (!isRecord(input) || !hasOnlyKeys(input, ['pedidoId'])) {
+    return err(validationError('El input de generar_comparativo tiene campos invalidos.'));
+  }
+  if (typeof input.pedidoId !== 'string' || input.pedidoId.trim() === '') {
+    return err(validationError('Indicame un pedidoId valido para generar el comparativo.'));
+  }
+  return ok({ pedidoId: input.pedidoId.trim() });
+}
+
 function normalizarTexto(value: string): string {
   return value
     .normalize('NFD')
@@ -459,6 +498,7 @@ async function notificarAdmins(
   ctx: Ctx,
   pedidoId: string,
   resumen: string,
+  payloadExtra?: Record<string, unknown>,
 ): Promise<number> {
   const admins = await ctx.repos.usuarios.activosPorRol('admin_materiales');
   for (const admin of admins) {
@@ -468,10 +508,177 @@ async function notificarAdmins(
       payload: {
         variables: [admin.nombre, resumen],
         pedido_id: pedidoId,
+        ...(payloadExtra ?? {}),
       },
     });
   }
   return admins.length;
+}
+
+function portalPathComparativo(pedidoId: string): string {
+  return `/pedidos/${pedidoId}/comparativo`;
+}
+
+function formatCRC(value: number): string {
+  return `CRC ${value.toFixed(2)}`;
+}
+
+function resumirProveedores(
+  filas: readonly ComparativoCotizacionFila[],
+): readonly ComparativoProveedorResumen[] {
+  const porProveedor = new Map<string, {
+    supplierId: string;
+    nombre: string;
+    quoteRequestId: string;
+    quoteRequestEstado: QuoteRequest['estado'];
+    quoteResponseId: string | null;
+    condiciones: string | null;
+    plazoEntrega: string | null;
+    total: number;
+    itemsCotizados: number;
+    itemsFaltantes: number;
+  }>();
+
+  for (const fila of filas) {
+    const actual = porProveedor.get(fila.supplierId) ?? {
+      supplierId: fila.supplierId,
+      nombre: fila.proveedor,
+      quoteRequestId: fila.quoteRequestId,
+      quoteRequestEstado: fila.quoteRequestEstado,
+      quoteResponseId: fila.quoteResponseId,
+      condiciones: fila.condiciones,
+      plazoEntrega: fila.plazoEntrega,
+      total: 0,
+      itemsCotizados: 0,
+      itemsFaltantes: 0,
+    };
+
+    actual.total += fila.subtotal ?? 0;
+    if (fila.faltante) {
+      actual.itemsFaltantes += 1;
+    } else {
+      actual.itemsCotizados += 1;
+    }
+    if (actual.quoteResponseId === null && fila.quoteResponseId !== null) {
+      actual.quoteResponseId = fila.quoteResponseId;
+      actual.condiciones = fila.condiciones;
+      actual.plazoEntrega = fila.plazoEntrega;
+    }
+
+    porProveedor.set(fila.supplierId, actual);
+  }
+
+  return [...porProveedor.values()].sort((a, b) => (
+    a.itemsFaltantes - b.itemsFaltantes ||
+    a.total - b.total ||
+    a.nombre.localeCompare(b.nombre)
+  ));
+}
+
+function resumenCortoComparativo(
+  pedido: Pedido,
+  resumenProveedores: readonly ComparativoProveedorResumen[],
+): string {
+  const proveedores = resumenProveedores
+    .slice(0, 3)
+    .map((proveedor) => (
+      `${proveedor.nombre}: ${formatCRC(proveedor.total)}, ` +
+      `${proveedor.itemsFaltantes} faltantes`
+    ))
+    .join('; ');
+  return `Comparativo ${pedido.numero} listo. ${proveedores}`;
+}
+
+function payloadComparativo(
+  pedido: Pedido,
+  filas: readonly ComparativoCotizacionFila[],
+  resumenProveedores: readonly ComparativoProveedorResumen[],
+  portalPath: string,
+  generadoAt: Date,
+): Record<string, unknown> {
+  return {
+    portal_path: portalPath,
+    comparativo: {
+      pedido_id: pedido.id,
+      numero: pedido.numero,
+      generado_at: generadoAt.toISOString(),
+      resumen_proveedores: resumenProveedores.map((proveedor) => ({
+        supplier_id: proveedor.supplierId,
+        nombre: proveedor.nombre,
+        quote_request_id: proveedor.quoteRequestId,
+        quote_request_estado: proveedor.quoteRequestEstado,
+        quote_response_id: proveedor.quoteResponseId,
+        condiciones: proveedor.condiciones,
+        plazo_entrega: proveedor.plazoEntrega,
+        total: proveedor.total,
+        items_cotizados: proveedor.itemsCotizados,
+        items_faltantes: proveedor.itemsFaltantes,
+      })),
+      filas: filas.map((fila) => ({
+        pedido_item_id: fila.pedidoItemId,
+        descripcion: fila.descripcion,
+        cantidad_solicitada: fila.cantidadSolicitada,
+        unidad: fila.unidad,
+        supplier_id: fila.supplierId,
+        proveedor: fila.proveedor,
+        quote_request_id: fila.quoteRequestId,
+        quote_request_estado: fila.quoteRequestEstado,
+        quote_response_id: fila.quoteResponseId,
+        precio_unitario: fila.precioUnitario,
+        cantidad_cotizada: fila.cantidadCotizada,
+        disponible: fila.disponible,
+        condiciones: fila.condiciones,
+        plazo_entrega: fila.plazoEntrega,
+        subtotal: fila.subtotal,
+        faltante: fila.faltante,
+        notas: fila.notas,
+      })),
+    },
+  };
+}
+
+async function generarComparativoParaPedido(
+  pedido: Pedido,
+  ctx: Ctx,
+): Promise<ResultadoTool<ResumenComparativoGenerado>> {
+  const filas = await ctx.repos.comparativos.porPedido(pedido.id);
+  if (filas.length === 0) {
+    return err(validationError('El pedido no tiene RFQs/cotizaciones para generar comparativo.'));
+  }
+
+  const resumenProveedores = resumirProveedores(filas);
+  const portalPath = portalPathComparativo(pedido.id);
+
+  await ctx.audit({
+    accion: 'generar_comparativo',
+    entidad: 'pedido',
+    entidadId: pedido.id,
+    pedidoId: pedido.id,
+    antes: null,
+    despues: {
+      pedido_id: pedido.id,
+      resumen_proveedores: resumenProveedores,
+      filas,
+      portal_path: portalPath,
+    },
+  });
+
+  const notificaciones = await notificarAdmins(
+    ctx,
+    pedido.id,
+    resumenCortoComparativo(pedido, resumenProveedores),
+    payloadComparativo(pedido, filas, resumenProveedores, portalPath, ctx.ahora),
+  );
+
+  return ok({
+    pedidoId: pedido.id,
+    numero: pedido.numero,
+    estado: 'en_revision',
+    filas,
+    resumenProveedores,
+    portalPath,
+    notificaciones,
+  });
 }
 
 export async function crearPedido(
@@ -763,6 +970,7 @@ export async function registrarCotizacion(
   let quoteRequestFinal = quoteRequest;
   let transicionoAEnRevision = false;
   let reviewQueueId: string | null = null;
+  let comparativo: ResumenComparativoGenerado | null = null;
 
   if (esIncompleta) {
     if (escala) {
@@ -838,6 +1046,14 @@ export async function registrarCotizacion(
     },
   });
 
+  if (transicionoAEnRevision) {
+    const comparativoResult = await generarComparativoParaPedido(pedidoFinal, ctx);
+    if (!comparativoResult.ok) {
+      throw new Error(`No se pudo generar comparativo para ${pedido.numero}: ${comparativoResult.error.mensaje}`);
+    }
+    comparativo = comparativoResult.value;
+  }
+
   if (esIncompleta) {
     return err({
       codigo: 'E2',
@@ -854,7 +1070,35 @@ export async function registrarCotizacion(
     pedidoId: pedido.id,
     pedidoEstado: pedidoFinal.estado,
     transicionoAEnRevision,
+    comparativo,
   });
+}
+
+export async function generarComparativo(
+  input: unknown,
+  ctx: Ctx,
+): Promise<ResultadoTool<ResumenComparativoGenerado>> {
+  if (!puedeUsarTool('generar_comparativo', ctx.actor.roles)) return err(errorRol);
+
+  const parsed = parseGenerarComparativoInput(input);
+  if (!parsed.ok) return parsed;
+
+  const pedido = await ctx.repos.pedidos.bloquearPorId(parsed.value.pedidoId);
+  if (pedido === null) {
+    return err({
+      codigo: 'no_encontrado',
+      mensaje: 'No encontre ese pedido para generar comparativo.',
+    });
+  }
+
+  if (pedido.estado !== 'en_revision') {
+    return err({
+      codigo: 'E12',
+      mensaje: `El pedido ${pedido.numero} esta en estado "${pedido.estado}" y aun no puede generar comparativo.`,
+    });
+  }
+
+  return generarComparativoParaPedido(pedido, ctx);
 }
 
 export async function confirmarPedido(

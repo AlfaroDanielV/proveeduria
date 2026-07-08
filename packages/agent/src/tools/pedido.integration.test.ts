@@ -135,6 +135,12 @@ describeIntegration('pedido tools con Postgres real', () => {
       if (!result.ok) throw new Error(result.error.mensaje);
       expect(result.value.pedidoEstado).toBe('en_revision');
       expect(result.value.transicionoAEnRevision).toBe(true);
+      expect(result.value.comparativo).toMatchObject({
+        pedidoId,
+        estado: 'en_revision',
+        notificaciones: 1,
+      });
+      expect(result.value.comparativo?.filas).toHaveLength(4);
     });
 
     const check = await pool.query<{
@@ -179,9 +185,9 @@ describeIntegration('pedido tools con Postgres real', () => {
     expect(Number(check.rows[0]?.quoteRequestCount)).toBe(2);
     expect(Number(check.rows[0]?.quoteResponseCount)).toBe(2);
     expect(Number(check.rows[0]?.quoteItemCount)).toBe(4);
-    expect(Number(check.rows[0]?.auditCount)).toBe(6);
+    expect(Number(check.rows[0]?.auditCount)).toBe(7);
     expect(Number(check.rows[0]?.approvalCount)).toBe(1);
-    expect(Number(check.rows[0]?.internalOutboxCount)).toBe(1);
+    expect(Number(check.rows[0]?.internalOutboxCount)).toBe(2);
     expect(Number(check.rows[0]?.rfqOutboxCount)).toBe(2);
   });
 });

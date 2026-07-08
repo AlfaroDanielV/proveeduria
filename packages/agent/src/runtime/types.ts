@@ -197,6 +197,30 @@ export interface QuoteItem extends QuoteItemInput {
   readonly quoteResponseId: string;
 }
 
+export interface ComparativoCotizacionFila {
+  readonly pedidoItemId: string;
+  readonly descripcion: string;
+  readonly cantidadSolicitada: number;
+  readonly unidad: string;
+  readonly supplierId: string;
+  readonly proveedor: string;
+  readonly quoteRequestId: string;
+  readonly quoteRequestEstado: QuoteRequest['estado'];
+  readonly quoteResponseId: string | null;
+  readonly precioUnitario: number | null;
+  readonly cantidadCotizada: number | null;
+  readonly disponible: boolean | null;
+  readonly condiciones: string | null;
+  readonly plazoEntrega: string | null;
+  readonly subtotal: number | null;
+  readonly faltante: boolean;
+  readonly notas: string | null;
+}
+
+export interface ComparativoRepo {
+  porPedido(pedidoId: string): Promise<readonly ComparativoCotizacionFila[]>;
+}
+
 export interface QuoteResponseRepo {
   crear(input: NuevoQuoteResponse): Promise<QuoteResponse>;
   insertarItems(
@@ -238,6 +262,7 @@ export interface Repos {
   readonly proveedores: ProveedorRepo;
   readonly quoteRequests: QuoteRequestRepo;
   readonly quoteResponses: QuoteResponseRepo;
+  readonly comparativos: ComparativoRepo;
   readonly reviewQueue: ReviewQueueRepo;
   readonly config: ConfigRepo;
 }

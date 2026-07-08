@@ -14,8 +14,8 @@ Hay dos sistemas conviviendo:
   de produccion definido por `docs/EXECUTION_PLAN.md`.
 
 El sistema nuevo esta en **Fase 2a**. Ya existe la capa deterministica de tools para pedido/RFQ/
-cotizaciones hasta `pedido.estado = en_revision`, pero aun falta conectarla al worker, al router,
-al loop Claude, al comparativo y al portal.
+cotizaciones hasta `pedido.estado = en_revision` con comparativo generado, pero aun falta
+conectarla al worker, al router, al loop Claude y al portal.
 
 ## Mapa principal
 
@@ -81,6 +81,7 @@ Runtime y tools deterministicas del agente.
   - `sugerirProveedores`
   - `enviarRfq`
   - `registrarCotizacion`
+  - `generarComparativo`
 - `src/tools/pedido.test.ts`: contrato unitario con fakes.
 - `src/tools/pedido.integration.test.ts`: flujo real contra Postgres efimero.
 
@@ -149,6 +150,14 @@ El flujo deterministico ya probado contra Postgres efimero es:
    - si incompleta: E2 con repregunta por outbox o `review_queue` si agoto intentos.
    - si completa: marca RFQ `respondida`.
    - cuando todas respondieron: transiciona `cotizando -> en_revision`.
+6. `generarComparativo`
+   - calcula SQL deterministico item x proveedor desde `pedido_items`, RFQs y la ultima
+     respuesta completa por proveedor.
+   - marca faltantes por sin respuesta, sin item, precio/cantidad faltante, cantidad menor
+     a la solicitada o `disponible=false`.
+   - registra audit y encola `notificacion_interna` con payload para WhatsApp/portal.
+   - tambien se ejecuta automaticamente dentro de la transaccion de la ultima cotizacion
+     completa que mueve el pedido a `en_revision`.
 
 Todo eso corre dentro de transacciones cuando se usa `withTx`; los tests con fakes verifican
 rollback de dominio + audit/outbox/approval/review.
@@ -186,11 +195,10 @@ El flujo objetivo del Modulo 1 es:
 
 Para completar el prototipo navegable:
 
-1. Terminar `generarComparativo`.
-2. Conectar worker/router al flujo de tools.
-3. Integrar extractor estructurado para texto/voz/foto de pedido/cotizacion.
-4. Hacer que Claude invoque tools, pero sin decidir permisos ni saltarse guardas.
-5. Portal: lista de pedidos, detalle, comparativo.
+1. Conectar worker/router al flujo de tools.
+2. Integrar extractor estructurado para texto/voz/foto de pedido/cotizacion.
+3. Hacer que Claude invoque tools, pero sin decidir permisos ni saltarse guardas.
+4. Portal: lista de pedidos, detalle, comparativo.
 
 ## Comandos de verificacion
 
