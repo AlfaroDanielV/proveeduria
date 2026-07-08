@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
-import { confirmarPedido, crearPedido } from './pedido.js';
+import { confirmarPedido, crearPedido, enviarRfq, sugerirProveedores } from './pedido.js';
 import { crearFakeCtx, FakeToolStore, withFakeCtx } from '../runtime/fakes.js';
-import type { Actor, Pedido, Proyecto, UsuarioInterno } from '../runtime/types.js';
+import type { Actor, Pedido, Proyecto, Proveedor, UsuarioInterno } from '../runtime/types.js';
 
 const AHORA = new Date('2026-07-07T12:00:00.000Z');
 
@@ -31,6 +31,12 @@ const actorOtroIngeniero: Actor = {
   roles: ['ingeniero'],
 };
 
+const actorAdminMateriales: Actor = {
+  userId: '20000000-0000-4000-8000-000000000002',
+  nombre: 'Jose Pablo',
+  roles: ['admin_materiales'],
+};
+
 const adminMateriales: UsuarioInterno = {
   userId: '20000000-0000-4000-8000-000000000002',
   nombre: 'Jose Pablo',
@@ -38,10 +44,42 @@ const adminMateriales: UsuarioInterno = {
   telefonoWhatsapp: '+50688880002',
 };
 
+const proveedorRodex: Proveedor = {
+  id: '40000000-0000-4000-8000-000000000001',
+  nombre: 'Rodex',
+  categorias: ['cemento', 'varilla', 'agregados'],
+  activo: true,
+  contactoPrincipal: {
+    id: '50000000-0000-4000-8000-000000000001',
+    supplierId: '40000000-0000-4000-8000-000000000001',
+    nombre: 'Ventas Rodex',
+    telefonoWhatsapp: '+50688881001',
+    optinAt: AHORA,
+    esPrincipal: true,
+  },
+};
+
+const proveedorLagar: Proveedor = {
+  id: '40000000-0000-4000-8000-000000000002',
+  nombre: 'El Lagar',
+  categorias: ['materiales', 'acabados', 'ferreteria'],
+  activo: true,
+  contactoPrincipal: {
+    id: '50000000-0000-4000-8000-000000000002',
+    supplierId: '40000000-0000-4000-8000-000000000002',
+    nombre: 'Ventas El Lagar',
+    telefonoWhatsapp: '+50688881002',
+    optinAt: AHORA,
+    esPrincipal: true,
+  },
+};
+
 function storeBase(): FakeToolStore {
   const store = new FakeToolStore();
   store.agregarProyecto(proyectoActivo);
   store.agregarUsuario(adminMateriales);
+  store.agregarProveedor(proveedorRodex);
+  store.agregarProveedor(proveedorLagar);
   return store;
 }
 
@@ -56,8 +94,29 @@ function pedidoBase(overrides: Partial<Pedido> = {}): Pedido {
     urgencia: null,
     confirmadoAt: null,
     confirmadoPor: null,
+    plazoCotizacionAt: null,
     ...overrides,
   };
+}
+
+function agregarPedidoConItems(store: FakeToolStore, pedido: Pedido = pedidoBase()): void {
+  store.pedidos.set(pedido.id, pedido);
+  store.itemsPorPedido.set(pedido.id, [
+    {
+      id: 'item-1',
+      pedidoId: pedido.id,
+      descripcion: 'Cemento gris',
+      cantidad: 10,
+      unidad: 'saco',
+    },
+    {
+      id: 'item-2',
+      pedidoId: pedido.id,
+      descripcion: 'Varilla #4',
+      cantidad: 25,
+      unidad: 'unidad',
+    },
+  ]);
 }
 
 describe('crearPedido', () => {
@@ -262,6 +321,183 @@ describe('confirmarPedido', () => {
   });
 });
 
+describe('sugerirProveedores', () => {
+  it('devuelve ranking editable de proveedores con contacto opt-in y registra audit', async () => {
+    const store = storeBase();
+    agregarPedidoConItems(store);
+    const ctx = crearFakeCtx(store, actorAdminMateriales, AHORA);
+
+    const result = await sugerirProveedores({ pedidoId: 'pedido-1' }, ctx);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error.mensaje);
+    expect(result.value.numero).toBe('PED-2026-001');
+    expect(result.value.proveedores.map((p) => p.supplierId)).toEqual([
+      proveedorRodex.id,
+      proveedorLagar.id,
+    ]);
+    expect(result.value.proveedores[0]).toMatchObject({
+      supplierId: proveedorRodex.id,
+      puntaje: 20,
+      razones: ['categoria: cemento', 'categoria: varilla'],
+    });
+    expect(store.auditEvents).toHaveLength(1);
+    expect(store.auditEvents[0]).toMatchObject({
+      accion: 'sugerir_proveedores',
+      entidad: 'pedido',
+      entidadId: 'pedido-1',
+    });
+    expect(store.outboxMessages).toHaveLength(0);
+    expect(store.quoteRequests).toHaveLength(0);
+  });
+
+  it('rechaza rol no permitido sin efectos', async () => {
+    const store = storeBase();
+    agregarPedidoConItems(store);
+    const ctx = crearFakeCtx(store, actorIngeniero, AHORA);
+
+    const result = await sugerirProveedores({ pedidoId: 'pedido-1' }, ctx);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('No debia sugerir proveedores.');
+    expect(result.error.codigo).toBe('rol_insuficiente');
+    expect(store.auditEvents).toHaveLength(0);
+    expect(store.outboxMessages).toHaveLength(0);
+  });
+});
+
+describe('enviarRfq', () => {
+  it('crea quote_requests, approval, audit, outbox y transiciona a cotizando', async () => {
+    const store = storeBase();
+    agregarPedidoConItems(store);
+    const ctx = crearFakeCtx(store, actorAdminMateriales, AHORA);
+
+    const result = await enviarRfq({
+      pedidoId: 'pedido-1',
+      supplierIds: [proveedorRodex.id, proveedorLagar.id],
+      plazoHoras: 12,
+    }, ctx);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error.mensaje);
+    expect(result.value).toMatchObject({
+      pedidoId: 'pedido-1',
+      numero: 'PED-2026-001',
+      estado: 'cotizando',
+      supplierIds: [proveedorRodex.id, proveedorLagar.id],
+      outbox: 2,
+    });
+    expect(result.value.plazoAt.toISOString()).toBe('2026-07-08T00:00:00.000Z');
+    expect(store.pedidos.get('pedido-1')).toMatchObject({
+      estado: 'cotizando',
+      plazoCotizacionAt: result.value.plazoAt,
+    });
+    expect(store.quoteRequests).toHaveLength(2);
+    expect(store.approvalEvents).toEqual([
+      {
+        tipo: 'lista_proveedores',
+        pedidoId: 'pedido-1',
+        canal: 'whatsapp',
+        detalle: {
+          supplier_ids: [proveedorRodex.id, proveedorLagar.id],
+          plazo_horas: 12,
+          plazo_at: '2026-07-08T00:00:00.000Z',
+        },
+      },
+    ]);
+    expect(store.auditEvents).toHaveLength(1);
+    expect(store.auditEvents[0]).toMatchObject({
+      accion: 'enviar_rfq',
+      entidad: 'pedido',
+      entidadId: 'pedido-1',
+    });
+    expect(store.outboxMessages).toHaveLength(2);
+    expect(store.outboxMessages[0]).toMatchObject({
+      destino: '+50688881001',
+      template: 'rfq_solicitud',
+      payload: {
+        variables: [
+          'Ventas Rodex',
+          'Residencial Lopez',
+          '1. Cemento gris - 10 saco\n2. Varilla #4 - 25 unidad',
+          '2026-07-08T00:00:00.000Z',
+          'PED-2026-001',
+        ],
+        pedido_id: 'pedido-1',
+        supplier_id: proveedorRodex.id,
+      },
+    });
+  });
+
+  it('rechaza rol no permitido sin efectos', async () => {
+    const store = storeBase();
+    agregarPedidoConItems(store);
+    const ctx = crearFakeCtx(store, actorIngeniero, AHORA);
+
+    const result = await enviarRfq({
+      pedidoId: 'pedido-1',
+      supplierIds: [proveedorRodex.id],
+    }, ctx);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('No debia enviar RFQ.');
+    expect(result.error.codigo).toBe('rol_insuficiente');
+    expect(store.pedidos.get('pedido-1')?.estado).toBe('borrador');
+    expect(store.quoteRequests).toHaveLength(0);
+    expect(store.approvalEvents).toHaveLength(0);
+    expect(store.outboxMessages).toHaveLength(0);
+  });
+
+  it('rechaza estado no-borrador con E12 sin efectos', async () => {
+    const store = storeBase();
+    agregarPedidoConItems(store, pedidoBase({ estado: 'cotizando' }));
+    const ctx = crearFakeCtx(store, actorAdminMateriales, AHORA);
+
+    const result = await enviarRfq({
+      pedidoId: 'pedido-1',
+      supplierIds: [proveedorRodex.id],
+    }, ctx);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('No debia enviar RFQ.');
+    expect(result.error.codigo).toBe('E12');
+    expect(store.quoteRequests).toHaveLength(0);
+    expect(store.approvalEvents).toHaveLength(0);
+    expect(store.outboxMessages).toHaveLength(0);
+  });
+
+  it('rechaza proveedor sin opt-in sin efectos', async () => {
+    const store = storeBase();
+    agregarPedidoConItems(store);
+    store.agregarProveedor({
+      ...proveedorRodex,
+      id: 'proveedor-sin-optin',
+      contactoPrincipal: {
+        id: 'contacto-sin-optin',
+        supplierId: 'proveedor-sin-optin',
+        nombre: 'Sin Optin',
+        telefonoWhatsapp: '+50688889999',
+        optinAt: null,
+        esPrincipal: true,
+      },
+    });
+    const ctx = crearFakeCtx(store, actorAdminMateriales, AHORA);
+
+    const result = await enviarRfq({
+      pedidoId: 'pedido-1',
+      supplierIds: ['proveedor-sin-optin'],
+    }, ctx);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('No debia enviar RFQ.');
+    expect(result.error.codigo).toBe('validacion');
+    expect(store.pedidos.get('pedido-1')?.estado).toBe('borrador');
+    expect(store.quoteRequests).toHaveLength(0);
+    expect(store.approvalEvents).toHaveLength(0);
+    expect(store.outboxMessages).toHaveLength(0);
+  });
+});
+
 describe('runtime fake transaccional', () => {
   it('revierte estado si falla despues de escribir dominio', async () => {
     const store = storeBase();
@@ -279,5 +515,24 @@ describe('runtime fake transaccional', () => {
     expect(store.auditEvents).toHaveLength(0);
     expect(store.outboxMessages).toHaveLength(0);
     expect(store.pedidoSeq).toBe(1);
+  });
+
+  it('revierte estado si falla outbox despues de approval y quote_requests', async () => {
+    const store = storeBase();
+    agregarPedidoConItems(store);
+    store.failOutbox = true;
+
+    await expect(
+      withFakeCtx(store, actorAdminMateriales, AHORA, async (ctx) => enviarRfq({
+        pedidoId: 'pedido-1',
+        supplierIds: [proveedorRodex.id],
+      }, ctx)),
+    ).rejects.toThrow('Fallo de outbox fake.');
+
+    expect(store.pedidos.get('pedido-1')?.estado).toBe('borrador');
+    expect(store.quoteRequests).toHaveLength(0);
+    expect(store.auditEvents).toHaveLength(0);
+    expect(store.approvalEvents).toHaveLength(0);
+    expect(store.outboxMessages).toHaveLength(0);
   });
 });

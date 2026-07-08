@@ -25,7 +25,7 @@ Contrato de cada herramienta expuesta al agente Claude. Reglas transversales:
 ### `sugerir_proveedores`
 - **Roles**: admin_materiales, superadmin.
 - **Input**: pedido_id.
-- **Efecto**: solo lectura — ranking por categoría e historial (compras previas, tasa de respuesta). Devuelve lista editable.
+- **Efecto**: solo lectura — ranking por categoría e historial (compras previas, tasa de respuesta; si aún no hay historial suficiente, esa señal queda neutra). Devuelve lista editable.
 
 ### `enviar_rfq`
 - **Roles**: admin_materiales, superadmin. Registra `approval_events(lista_proveedores)`.

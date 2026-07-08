@@ -1,5 +1,6 @@
 import type { Actor, Ctx, Repos, Tx } from './types.js';
 import type { OrigenAudit } from '@proveeduria/core';
+import { crearApprovalInserter } from './approval.js';
 import { crearAuditInserter } from './audit.js';
 import { crearOutboxInserter } from './outbox.js';
 import { crearReposPg } from './repos.js';
@@ -26,6 +27,7 @@ export function crearCtx({
     origen,
     audit: crearAuditInserter(tx, actor, ahora, origen),
     outbox: crearOutboxInserter(tx),
+    approval: crearApprovalInserter(tx, actor, ahora),
     repos,
   };
 }

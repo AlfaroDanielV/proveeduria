@@ -1,9 +1,11 @@
 import type {
+  CanalAprobacion,
   CodigoExcepcion,
   EstadoPedido,
   OrigenAudit,
   Result,
   Rol,
+  TipoAprobacion,
 } from '@proveeduria/core';
 
 export interface Actor {
@@ -69,6 +71,7 @@ export interface Pedido {
   readonly urgencia: string | null;
   readonly confirmadoAt: Date | null;
   readonly confirmadoPor: string | null;
+  readonly plazoCotizacionAt: Date | null;
 }
 
 export interface NuevoPedido {
@@ -81,17 +84,20 @@ export interface NuevoPedido {
 
 export interface ProyectoRepo {
   activoPorId(projectId: string): Promise<Proyecto | null>;
+  porId(projectId: string): Promise<Proyecto | null>;
 }
 
 export interface PedidoRepo {
   siguienteNumeroPedido(ahora: Date): Promise<string>;
   crear(input: NuevoPedido): Promise<Pedido>;
   porId(pedidoId: string): Promise<Pedido | null>;
+  bloquearPorId(pedidoId: string): Promise<Pedido | null>;
   confirmar(
     pedidoId: string,
     confirmadoAt: Date,
     confirmadoPor: string,
   ): Promise<Pedido>;
+  marcarCotizando(pedidoId: string, plazoCotizacionAt: Date): Promise<Pedido>;
 }
 
 export interface PedidoItemRepo {
@@ -107,11 +113,53 @@ export interface UsuarioRepo {
   activosPorRol(role: Rol): Promise<readonly UsuarioInterno[]>;
 }
 
+export interface ProveedorContacto {
+  readonly id: string;
+  readonly supplierId: string;
+  readonly nombre: string | null;
+  readonly telefonoWhatsapp: string;
+  readonly optinAt: Date | null;
+  readonly esPrincipal: boolean;
+}
+
+export interface Proveedor {
+  readonly id: string;
+  readonly nombre: string;
+  readonly categorias: readonly string[];
+  readonly activo: boolean;
+  readonly contactoPrincipal: ProveedorContacto | null;
+}
+
+export interface ProveedorRepo {
+  activosConContactoOptIn(): Promise<readonly Proveedor[]>;
+  porIdsConContactoOptIn(supplierIds: readonly string[]): Promise<readonly Proveedor[]>;
+}
+
+export interface QuoteRequest {
+  readonly id: string;
+  readonly pedidoId: string;
+  readonly supplierId: string;
+  readonly plazoAt: Date;
+  readonly estado: 'enviada' | 'respondida' | 'vencida' | 'declinada';
+}
+
+export interface NuevoQuoteRequest {
+  readonly pedidoId: string;
+  readonly supplierId: string;
+  readonly plazoAt: Date;
+}
+
+export interface QuoteRequestRepo {
+  crear(input: NuevoQuoteRequest): Promise<QuoteRequest>;
+}
+
 export interface Repos {
   readonly proyectos: ProyectoRepo;
   readonly pedidos: PedidoRepo;
   readonly pedidoItems: PedidoItemRepo;
   readonly usuarios: UsuarioRepo;
+  readonly proveedores: ProveedorRepo;
+  readonly quoteRequests: QuoteRequestRepo;
 }
 
 export interface AuditEvent {
@@ -132,6 +180,14 @@ export interface OutboxMessage {
   readonly nextRetryAt?: Date | null;
 }
 
+export interface ApprovalEvent {
+  readonly tipo: TipoAprobacion;
+  readonly pedidoId?: string | null;
+  readonly canal: CanalAprobacion;
+  readonly detalle?: unknown;
+  readonly at?: Date;
+}
+
 export interface Ctx {
   readonly tx: Tx;
   readonly actor: Actor;
@@ -139,5 +195,6 @@ export interface Ctx {
   readonly origen: OrigenAudit;
   readonly audit: (e: AuditEvent) => Promise<void>;
   readonly outbox: (m: OutboxMessage) => Promise<void>;
+  readonly approval: (e: ApprovalEvent) => Promise<void>;
   readonly repos: Repos;
 }

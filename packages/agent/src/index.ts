@@ -51,6 +51,7 @@ export interface ContextoRemitente {
 
 export * from './runtime/types.js';
 export * from './runtime/tx.js';
+export * from './runtime/approval.js';
 export * from './runtime/audit.js';
 export * from './runtime/outbox.js';
 export * from './runtime/repos.js';

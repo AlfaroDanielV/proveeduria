@@ -3,12 +3,18 @@ import type {
   Actor,
   ItemPedidoInput,
   NuevoPedido,
+  NuevoQuoteRequest,
   Pedido,
   PedidoItem,
   PedidoItemRepo,
   PedidoRepo,
   Proyecto,
   ProyectoRepo,
+  Proveedor,
+  ProveedorContacto,
+  ProveedorRepo,
+  QuoteRequest,
+  QuoteRequestRepo,
   Repos,
   Tx,
   UsuarioInterno,
@@ -32,6 +38,7 @@ interface PedidoRow {
   readonly urgencia: string | null;
   readonly confirmadoAt: Date | string | null;
   readonly confirmadoPor: string | null;
+  readonly plazoCotizacionAt: Date | string | null;
 }
 
 interface PedidoItemRow {
@@ -49,9 +56,38 @@ interface UsuarioRow {
   readonly roles: readonly Rol[] | string;
 }
 
+interface ProveedorRow {
+  readonly id: string;
+  readonly nombre: string;
+  readonly categorias: readonly string[] | string;
+  readonly activo: boolean;
+  readonly contactoId: string | null;
+  readonly contactoNombre: string | null;
+  readonly contactoTelefono: string | null;
+  readonly contactoOptinAt: Date | string | null;
+  readonly contactoEsPrincipal: boolean | null;
+}
+
+interface QuoteRequestRow {
+  readonly id: string;
+  readonly pedidoId: string;
+  readonly supplierId: string;
+  readonly plazoAt: Date | string;
+  readonly estado: QuoteRequest['estado'];
+}
+
 function rolesFromRow(value: readonly Rol[] | string): readonly Rol[] {
   if (typeof value !== 'string') return value;
   return value.replace(/[{}]/g, '').split(',').filter(Boolean) as Rol[];
+}
+
+function textArrayFromRow(value: readonly string[] | string): readonly string[] {
+  if (typeof value !== 'string') return value;
+  return value.replace(/[{}]/g, '').split(',').filter(Boolean);
+}
+
+function dateFromRow(value: Date | string): Date {
+  return value instanceof Date ? value : new Date(value);
 }
 
 function mapPedido(row: PedidoRow): Pedido {
@@ -66,10 +102,12 @@ function mapPedido(row: PedidoRow): Pedido {
     confirmadoAt:
       row.confirmadoAt === null
         ? null
-        : row.confirmadoAt instanceof Date
-          ? row.confirmadoAt
-          : new Date(row.confirmadoAt),
+        : dateFromRow(row.confirmadoAt),
     confirmadoPor: row.confirmadoPor,
+    plazoCotizacionAt:
+      row.plazoCotizacionAt === null
+        ? null
+        : dateFromRow(row.plazoCotizacionAt),
   };
 }
 
@@ -99,12 +137,58 @@ function mapUsuarioInterno(row: UsuarioRow): UsuarioInterno | null {
   };
 }
 
+function mapProveedor(row: ProveedorRow): Proveedor {
+  let contactoPrincipal: ProveedorContacto | null = null;
+  if (
+    row.contactoId !== null &&
+    row.contactoTelefono !== null &&
+    row.contactoEsPrincipal !== null
+  ) {
+    contactoPrincipal = {
+      id: row.contactoId,
+      supplierId: row.id,
+      nombre: row.contactoNombre,
+      telefonoWhatsapp: row.contactoTelefono,
+      optinAt:
+        row.contactoOptinAt === null
+          ? null
+          : dateFromRow(row.contactoOptinAt),
+      esPrincipal: row.contactoEsPrincipal,
+    };
+  }
+  return {
+    id: row.id,
+    nombre: row.nombre,
+    categorias: textArrayFromRow(row.categorias),
+    activo: row.activo,
+    contactoPrincipal,
+  };
+}
+
+function mapQuoteRequest(row: QuoteRequestRow): QuoteRequest {
+  return {
+    id: row.id,
+    pedidoId: row.pedidoId,
+    supplierId: row.supplierId,
+    plazoAt: dateFromRow(row.plazoAt),
+    estado: row.estado,
+  };
+}
+
 export class PgProyectoRepo implements ProyectoRepo {
   constructor(private readonly tx: Tx) {}
 
   async activoPorId(projectId: string): Promise<Proyecto | null> {
     const result = await this.tx.query<ProyectoRow>(
       'SELECT id, nombre, codigo, activo FROM projects WHERE id = $1 AND activo IS TRUE',
+      [projectId],
+    );
+    return result.rows[0] ?? null;
+  }
+
+  async porId(projectId: string): Promise<Proyecto | null> {
+    const result = await this.tx.query<ProyectoRow>(
+      'SELECT id, nombre, codigo, activo FROM projects WHERE id = $1',
       [projectId],
     );
     return result.rows[0] ?? null;
@@ -135,7 +219,8 @@ export class PgPedidoRepo implements PedidoRepo {
         'RETURNING id, numero, project_id AS "projectId", ' +
         'solicitante_user_id AS "solicitanteUserId", estado, ' +
         'fecha_requerida::text AS "fechaRequerida", urgencia, ' +
-        'confirmado_at AS "confirmadoAt", confirmado_por AS "confirmadoPor"',
+        'confirmado_at AS "confirmadoAt", confirmado_por AS "confirmadoPor", ' +
+        'plazo_cotizacion_at AS "plazoCotizacionAt"',
       [
         input.numero,
         input.projectId,
@@ -154,8 +239,23 @@ export class PgPedidoRepo implements PedidoRepo {
       'SELECT id, numero, project_id AS "projectId", ' +
         'solicitante_user_id AS "solicitanteUserId", estado, ' +
         'fecha_requerida::text AS "fechaRequerida", urgencia, ' +
-        'confirmado_at AS "confirmadoAt", confirmado_por AS "confirmadoPor" ' +
+        'confirmado_at AS "confirmadoAt", confirmado_por AS "confirmadoPor", ' +
+        'plazo_cotizacion_at AS "plazoCotizacionAt" ' +
         'FROM pedidos WHERE id = $1',
+      [pedidoId],
+    );
+    const row = result.rows[0];
+    return row === undefined ? null : mapPedido(row);
+  }
+
+  async bloquearPorId(pedidoId: string): Promise<Pedido | null> {
+    const result = await this.tx.query<PedidoRow>(
+      'SELECT id, numero, project_id AS "projectId", ' +
+        'solicitante_user_id AS "solicitanteUserId", estado, ' +
+        'fecha_requerida::text AS "fechaRequerida", urgencia, ' +
+        'confirmado_at AS "confirmadoAt", confirmado_por AS "confirmadoPor", ' +
+        'plazo_cotizacion_at AS "plazoCotizacionAt" ' +
+        'FROM pedidos WHERE id = $1 FOR UPDATE',
       [pedidoId],
     );
     const row = result.rows[0];
@@ -173,11 +273,28 @@ export class PgPedidoRepo implements PedidoRepo {
         'RETURNING id, numero, project_id AS "projectId", ' +
         'solicitante_user_id AS "solicitanteUserId", estado, ' +
         'fecha_requerida::text AS "fechaRequerida", urgencia, ' +
-        'confirmado_at AS "confirmadoAt", confirmado_por AS "confirmadoPor"',
+        'confirmado_at AS "confirmadoAt", confirmado_por AS "confirmadoPor", ' +
+        'plazo_cotizacion_at AS "plazoCotizacionAt"',
       [pedidoId, confirmadoAt, confirmadoPor],
     );
     const row = result.rows[0];
     if (row === undefined) throw new Error(`Pedido no encontrado al confirmar: ${pedidoId}.`);
+    return mapPedido(row);
+  }
+
+  async marcarCotizando(pedidoId: string, plazoCotizacionAt: Date): Promise<Pedido> {
+    const result = await this.tx.query<PedidoRow>(
+      "UPDATE pedidos SET estado = 'cotizando', plazo_cotizacion_at = $2 " +
+        'WHERE id = $1 ' +
+        'RETURNING id, numero, project_id AS "projectId", ' +
+        'solicitante_user_id AS "solicitanteUserId", estado, ' +
+        'fecha_requerida::text AS "fechaRequerida", urgencia, ' +
+        'confirmado_at AS "confirmadoAt", confirmado_por AS "confirmadoPor", ' +
+        'plazo_cotizacion_at AS "plazoCotizacionAt"',
+      [pedidoId, plazoCotizacionAt],
+    );
+    const row = result.rows[0];
+    if (row === undefined) throw new Error(`Pedido no encontrado al marcar cotizando: ${pedidoId}.`);
     return mapPedido(row);
   }
 }
@@ -252,11 +369,74 @@ export class PgUsuarioRepo implements UsuarioRepo {
   }
 }
 
+export class PgProveedorRepo implements ProveedorRepo {
+  constructor(private readonly tx: Tx) {}
+
+  async activosConContactoOptIn(): Promise<readonly Proveedor[]> {
+    const result = await this.tx.query<ProveedorRow>(
+      'SELECT s.id, s.nombre, s.categorias, s.activo, ' +
+        'sc.id AS "contactoId", sc.nombre AS "contactoNombre", ' +
+        'sc.telefono_whatsapp AS "contactoTelefono", sc.optin_at AS "contactoOptinAt", ' +
+        'sc.es_principal AS "contactoEsPrincipal" ' +
+        'FROM suppliers s ' +
+        'JOIN LATERAL ( ' +
+        'SELECT id, nombre, telefono_whatsapp, optin_at, es_principal ' +
+        'FROM supplier_contacts ' +
+        'WHERE supplier_id = s.id AND optin_at IS NOT NULL ' +
+        'ORDER BY es_principal DESC, created_at ASC, id ASC LIMIT 1 ' +
+        ') sc ON true ' +
+        'WHERE s.activo IS TRUE ' +
+        'ORDER BY s.nombre',
+    );
+    return result.rows.map(mapProveedor);
+  }
+
+  async porIdsConContactoOptIn(supplierIds: readonly string[]): Promise<readonly Proveedor[]> {
+    if (supplierIds.length === 0) return [];
+    const result = await this.tx.query<ProveedorRow>(
+      'SELECT s.id, s.nombre, s.categorias, s.activo, ' +
+        'sc.id AS "contactoId", sc.nombre AS "contactoNombre", ' +
+        'sc.telefono_whatsapp AS "contactoTelefono", sc.optin_at AS "contactoOptinAt", ' +
+        'sc.es_principal AS "contactoEsPrincipal" ' +
+        'FROM suppliers s ' +
+        'JOIN LATERAL ( ' +
+        'SELECT id, nombre, telefono_whatsapp, optin_at, es_principal ' +
+        'FROM supplier_contacts ' +
+        'WHERE supplier_id = s.id AND optin_at IS NOT NULL ' +
+        'ORDER BY es_principal DESC, created_at ASC, id ASC LIMIT 1 ' +
+        ') sc ON true ' +
+        'WHERE s.activo IS TRUE AND s.id = ANY($1::uuid[]) ' +
+        'ORDER BY array_position($1::uuid[], s.id)',
+      [supplierIds],
+    );
+    return result.rows.map(mapProveedor);
+  }
+}
+
+export class PgQuoteRequestRepo implements QuoteRequestRepo {
+  constructor(private readonly tx: Tx) {}
+
+  async crear(input: NuevoQuoteRequest): Promise<QuoteRequest> {
+    const result = await this.tx.query<QuoteRequestRow>(
+      'INSERT INTO quote_requests (pedido_id, supplier_id, plazo_at) ' +
+        'VALUES ($1, $2, $3) ' +
+        'RETURNING id, pedido_id AS "pedidoId", supplier_id AS "supplierId", ' +
+        'plazo_at AS "plazoAt", estado',
+      [input.pedidoId, input.supplierId, input.plazoAt],
+    );
+    const row = result.rows[0];
+    if (row === undefined) throw new Error('No se pudo crear quote_request.');
+    return mapQuoteRequest(row);
+  }
+}
+
 export function crearReposPg(tx: Tx): Repos {
   return {
     proyectos: new PgProyectoRepo(tx),
     pedidos: new PgPedidoRepo(tx),
     pedidoItems: new PgPedidoItemRepo(tx),
     usuarios: new PgUsuarioRepo(tx),
+    proveedores: new PgProveedorRepo(tx),
+    quoteRequests: new PgQuoteRequestRepo(tx),
   };
 }

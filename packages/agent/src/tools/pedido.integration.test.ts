@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { Pool } from 'pg';
 
-import { confirmarPedido, crearPedido } from './pedido.js';
+import { confirmarPedido, crearPedido, enviarRfq, sugerirProveedores } from './pedido.js';
 import { crearCtx } from '../runtime/context.js';
 import { withTx } from '../runtime/tx.js';
 import type { Actor } from '../runtime/types.js';
@@ -16,6 +16,12 @@ const actorIngeniero: Actor = {
   roles: ['ingeniero'],
 };
 
+const actorAdminMateriales: Actor = {
+  userId: '20000000-0000-4000-8000-000000000002',
+  nombre: 'Jose Pablo',
+  roles: ['admin_materiales'],
+};
+
 describeIntegration('pedido tools con Postgres real', () => {
   const pool = new Pool({ connectionString: DATABASE_URL });
 
@@ -23,7 +29,7 @@ describeIntegration('pedido tools con Postgres real', () => {
     await pool.end();
   });
 
-  it('crea y confirma un pedido con dominio, audit y outbox en base real', async () => {
+  it('crea, confirma, sugiere proveedores y envia RFQ en base real', async () => {
     const ahora = new Date('2026-07-07T12:00:00.000Z');
     let pedidoId = '';
 
@@ -55,30 +61,68 @@ describeIntegration('pedido tools con Postgres real', () => {
       expect(result.value.notificaciones).toBe(1);
     });
 
+    await withTx(pool, async (tx) => {
+      const ctx = crearCtx({ tx, actor: actorAdminMateriales, ahora });
+      const result = await sugerirProveedores({ pedidoId }, ctx);
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error(result.error.mensaje);
+      expect(result.value.proveedores.map((p) => p.supplierId)).toContain(
+        '40000000-0000-4000-8000-000000000001',
+      );
+    });
+
+    await withTx(pool, async (tx) => {
+      const ctx = crearCtx({ tx, actor: actorAdminMateriales, ahora });
+      const result = await enviarRfq({
+        pedidoId,
+        supplierIds: [
+          '40000000-0000-4000-8000-000000000001',
+          '40000000-0000-4000-8000-000000000002',
+        ],
+      }, ctx);
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error(result.error.mensaje);
+      expect(result.value.estado).toBe('cotizando');
+      expect(result.value.quoteRequests).toHaveLength(2);
+      expect(result.value.outbox).toBe(2);
+    });
+
     const check = await pool.query<{
       numero: string;
       estado: string;
       confirmadoPor: string | null;
       itemCount: string;
+      quoteRequestCount: string;
       auditCount: string;
-      outboxCount: string;
+      approvalCount: string;
+      internalOutboxCount: string;
+      rfqOutboxCount: string;
     }>(
       'SELECT p.numero, p.estado, p.confirmado_por AS "confirmadoPor", ' +
         '(SELECT count(*) FROM pedido_items pi WHERE pi.pedido_id = p.id) AS "itemCount", ' +
+        '(SELECT count(*) FROM quote_requests qr WHERE qr.pedido_id = p.id) AS "quoteRequestCount", ' +
         '(SELECT count(*) FROM audit_events ae WHERE ae.pedido_id = p.id) AS "auditCount", ' +
+        '(SELECT count(*) FROM approval_events ap WHERE ap.pedido_id = p.id) AS "approvalCount", ' +
         "(SELECT count(*) FROM outbox_messages om WHERE om.template = 'notificacion_interna' " +
-        "AND om.payload->>'pedido_id' = p.id::text) AS \"outboxCount\" " +
+        "AND om.payload->>'pedido_id' = p.id::text) AS \"internalOutboxCount\", " +
+        "(SELECT count(*) FROM outbox_messages om WHERE om.template = 'rfq_solicitud' " +
+        "AND om.payload->>'pedido_id' = p.id::text) AS \"rfqOutboxCount\" " +
         'FROM pedidos p WHERE p.id = $1',
       [pedidoId],
     );
 
     expect(check.rows[0]).toMatchObject({
-      estado: 'borrador',
+      estado: 'cotizando',
       confirmadoPor: actorIngeniero.userId,
     });
     expect(check.rows[0]?.numero).toMatch(/^PED-2026-\d{3,}$/);
     expect(Number(check.rows[0]?.itemCount)).toBe(2);
-    expect(Number(check.rows[0]?.auditCount)).toBe(2);
-    expect(Number(check.rows[0]?.outboxCount)).toBe(1);
+    expect(Number(check.rows[0]?.quoteRequestCount)).toBe(2);
+    expect(Number(check.rows[0]?.auditCount)).toBe(4);
+    expect(Number(check.rows[0]?.approvalCount)).toBe(1);
+    expect(Number(check.rows[0]?.internalOutboxCount)).toBe(1);
+    expect(Number(check.rows[0]?.rfqOutboxCount)).toBe(2);
   });
 });
