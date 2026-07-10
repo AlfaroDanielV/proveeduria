@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Proveeduria</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Proyekta</p>
+          <h1>Proveeduria</h1>
+        </div>
+        <form class="connection" id="connection-form">
+          <label>
+            <span>API</span>
+            <input id="api-base" name="apiBase" autocomplete="off" />
+          </label>
+          <label>
+            <span>Usuario</span>
+            <select id="user-id" name="userId"></select>
+          </label>
+          <button type="submit">Actualizar</button>
+        </form>
+      </header>
+
+      <section class="toolbar" aria-label="Filtros de pedidos">
+        <label>
+          <span>Estado</span>
+          <select id="estado-filter">
+            <option value="">Todos</option>
+            <option value="borrador">Borrador</option>
+            <option value="cotizando">Cotizando</option>
+            <option value="en_revision">En revision</option>
+            <option value="aprobado">Aprobado</option>
+            <option value="ordenado">Ordenado</option>
+            <option value="recepcion_parcial">Recepcion parcial</option>
+            <option value="recepcion_total">Recepcion total</option>
+            <option value="cerrado">Cerrado</option>
+            <option value="cancelado">Cancelado</option>
+          </select>
+        </label>
+        <label>
+          <span>Proyecto</span>
+          <input id="project-filter" placeholder="UUID opcional" autocomplete="off" />
+        </label>
+        <button id="reload" type="button">Recargar</button>
+        <div id="session" class="session"></div>
+      </section>
+
+      <section class="workspace">
+        <aside class="pedido-list" aria-label="Pedidos">
+          <div class="panel-title">
+            <h2>Pedidos</h2>
+            <span id="pedido-count">0</span>
+          </div>
+          <div id="pedidos" class="rows"></div>
+        </aside>
+
+        <section class="detail" aria-label="Detalle del pedido">
+          <div id="empty-state" class="empty-state">
+            <h2>Sin pedido seleccionado</h2>
+          </div>
+
+          <div id="pedido-detail" class="detail-content" hidden>
+            <div class="detail-head">
+              <div>
+                <p id="detail-project" class="eyebrow"></p>
+                <h2 id="detail-title"></h2>
+              </div>
+              <span id="detail-status" class="status"></span>
+            </div>
+
+            <div class="metrics">
+              <div>
+                <span>Items</span>
+                <strong id="metric-items">0</strong>
+              </div>
+              <div>
+                <span>RFQs</span>
+                <strong id="metric-rfqs">0</strong>
+              </div>
+              <div>
+                <span>Respondidas</span>
+                <strong id="metric-rfqs-ok">0</strong>
+              </div>
+              <div>
+                <span>Revision</span>
+                <strong id="metric-review">0</strong>
+              </div>
+            </div>
+
+            <div class="split">
+              <section>
+                <div class="panel-title compact">
+                  <h3>Items</h3>
+                </div>
+                <div id="items" class="compact-list"></div>
+              </section>
+              <section>
+                <div class="panel-title compact">
+                  <h3>Cotizaciones</h3>
+                </div>
+                <div id="quotes" class="compact-list"></div>
+              </section>
+            </div>
+
+            <section class="comparativo-section">
+              <div class="panel-title">
+                <h3>Comparativo</h3>
+                <span id="comparativo-count">0</span>
+              </div>
+              <div id="proveedores" class="supplier-summary"></div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Item</th>
+                      <th>Proveedor</th>
+                      <th>Precio</th>
+                      <th>Cantidad</th>
+                      <th>Subtotal</th>
+                      <th>Estado</th>
+                    </tr>
+                  </thead>
+                  <tbody id="comparativo"></tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <div id="toast" class="toast" hidden></div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

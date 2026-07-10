@@ -7,6 +7,7 @@ Contrato de cada herramienta expuesta al agente Claude. Reglas transversales:
 - Errores de validación devuelven mensaje explicable al usuario; nunca stack traces.
 - Inputs con schema JSON estricto (`additionalProperties: false`).
 - El router decide el contexto: remitente interno (usuario) vs proveedor (`supplier_contacts`) vs desconocido (E11) — los proveedores solo activan el flujo de captura de cotización/confirmación de OC, jamás tools internas.
+- El loop de agente solo puede ejecutar llamadas de tool con nombre whitelisted y input JSON estructurado. En Fase 2a se acepta un `tool_call` ya estructurado como harness determinístico; el texto libre y adjuntos deben pasar por extractor/Claude antes de llegar a la tool.
 
 ## Pedidos
 

@@ -1,0 +1,11 @@
+{
+  "name": "@proveeduria/portal",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node scripts/check.mjs",
+    "dev": "node scripts/dev-server.mjs"
+  }
+}

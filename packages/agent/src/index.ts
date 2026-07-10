@@ -57,3 +57,7 @@ export * from './runtime/outbox.js';
 export * from './runtime/repos.js';
 export * from './runtime/context.js';
 export * from './tools/pedido.js';
+export * from './agent/types.js';
+export * from './agent/structured.js';
+export * from './agent/tool-dispatcher.js';
+export * from './agent/loop.js';

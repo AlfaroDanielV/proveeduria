@@ -396,6 +396,35 @@ const TOOL_ROLES = {
   generar_link_dashboard: ['admin', 'superadmin'],
 };
 
+// Tools que exigen un usuario interno reconocido (fila en `usuarios`), sin exigir un
+// rol específico. Defensa en profundidad sobre el gate de remitente de askClaude: evita
+// que un proveedor o un desconocido lea el gasto de los proyectos o registre compras.
+// Para gating por rol más fino, confirmá primero los valores reales de `usuarios.rol`
+// en la base y agregá entradas a TOOL_ROLES.
+const TOOLS_SOLO_INTERNOS = new Set([
+  'registrar_movimiento',
+  'corregir_movimiento',
+  'registrar_factura_escaneada',
+  'confirmar_factura',
+  'consultar_inventario',
+  'listar_proyectos',
+]);
+
+// Mensaje genérico para remitentes no autorizados (no revela datos internos).
+const MENSAJE_REMITENTE_DESCONOCIDO =
+  'Hola 👋 Este número es exclusivo para el equipo interno de proveeduría de la empresa ' +
+  'constructora. Si creés que deberías tener acceso, escribile al administrador para que te registre.';
+
+// Busca un usuario interno por teléfono. Devuelve null si no existe / no está registrado.
+async function lookupUsuario(phoneNumber) {
+  const { data } = await supabase
+    .from('usuarios')
+    .select('id, nombre, rol')
+    .eq('telefono', phoneNumber)
+    .single();
+  return data || null;
+}
+
 // ============================================================
 // DASHBOARD JWT (HS256, sin dependencias externas)
 // ============================================================
@@ -421,18 +450,46 @@ function signDashboardToken(payload, secret, expiresInSeconds) {
   return `${toSign}.${sig}`;
 }
 
+// ============================================================
+// WEBHOOK SIGNATURE VERIFICATION (Meta X-Hub-Signature-256)
+// ============================================================
+// Portado de apps/api/src/webhook/verify.ts. Meta firma el CUERPO CRUDO:
+//   X-Hub-Signature-256: sha256=HMAC_SHA256(META_APP_SECRET, rawBody)
+// Comparación en tiempo constante. Devuelve false si el secreto/firma faltan o no coinciden.
+function verifyMetaSignature(rawBody, header, appSecret) {
+  if (!appSecret || appSecret.length === 0) return false;
+  if (typeof header !== 'string' || header.length === 0) return false;
+
+  const [scheme, hex] = header.split('=');
+  if (scheme !== 'sha256' || !hex) return false;
+
+  const provided = Buffer.from(hex, 'hex');
+  if (provided.length === 0) return false;
+
+  const expected = crypto.createHmac('sha256', appSecret).update(rawBody).digest();
+  if (provided.length !== expected.length) return false;
+
+  return crypto.timingSafeEqual(expected, provided);
+}
+
 async function handleTool(toolName, input, phoneNumber) {
   // Buscar usuario por teléfono
-  const { data: usuario } = await supabase
-    .from('usuarios')
-    .select('id, nombre, rol')
-    .eq('telefono', phoneNumber)
-    .single();
+  const usuario = await lookupUsuario(phoneNumber);
 
   const userId = usuario?.id || null;
   const userRole = usuario?.rol || null;
 
-  // Role gate — devuelve un resultado estructurado que Claude traduce al usuario
+  // Gate 1 — usuario interno: las tools sensibles de materiales/consulta exigen una fila
+  // en `usuarios`. Defensa en profundidad sobre el gate de remitente de askClaude.
+  if (TOOLS_SOLO_INTERNOS.has(toolName) && !userId) {
+    return JSON.stringify({
+      error: 'no_autorizado',
+      tool: toolName,
+      mensaje: 'Solo usuarios internos registrados pueden usar esta acción.',
+    });
+  }
+
+  // Gate 2 — rol específico: devuelve un resultado estructurado que Claude traduce al usuario
   const requiredRoles = TOOL_ROLES[toolName];
   if (requiredRoles && !requiredRoles.includes(userRole)) {
     return JSON.stringify({
@@ -976,6 +1033,16 @@ function trimConversation(messages) {
 // El loop continúa hasta que Claude responde con texto puro (end_turn).
 
 async function askClaude(phoneNumber, userMessage) {
+  // Gate de remitente: solo usuarios internos activos pueden usar el agente. Bloquea a
+  // desconocidos ANTES de correr el loop de tools (evita fuga de datos y gasto de API a
+  // números no autorizados). Los proveedores NO son usuarios internos: su atención es
+  // manual durante el piloto (ver docs/PILOT_VALIDATION_COOKBOOK.md).
+  const remitente = await lookupUsuario(phoneNumber);
+  if (!remitente) {
+    console.warn(`Remitente no autorizado (sin fila en usuarios): ${phoneNumber}`);
+    return MENSAJE_REMITENTE_DESCONOCIDO;
+  }
+
   const messages = getConversation(phoneNumber);
 
   // Si userMessage es un array (contiene imagen), úsalo directo
@@ -1413,16 +1480,38 @@ const server = http.createServer((req, res) => {
   }
 
   if (url.pathname === '/webhook' && req.method === 'POST') {
-    let body = '';
+    const chunks = [];
     req.on('data', (chunk) => {
-      body += chunk;
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
     });
     req.on('end', () => {
+      const raw = Buffer.concat(chunks);
+
+      // Verificación de firma HMAC sobre el CUERPO CRUDO, antes de procesar nada.
+      // Se exige solo si META_APP_SECRET está configurado, para no tumbar el bot en un
+      // deploy donde el secreto aún no se cargó. Con el secreto puesto, una firma
+      // inválida o ausente se rechaza con 401. Configuralo para endurecer el webhook.
+      const appSecret = process.env.META_APP_SECRET;
+      if (appSecret) {
+        const signature = req.headers['x-hub-signature-256'];
+        if (!verifyMetaSignature(raw, typeof signature === 'string' ? signature : '', appSecret)) {
+          console.warn('Webhook rechazado: firma X-Hub-Signature-256 inválida o ausente.');
+          res.writeHead(401);
+          res.end();
+          return;
+        }
+      } else {
+        console.warn(
+          'META_APP_SECRET no configurado: el webhook se procesa SIN verificar firma. ' +
+            'Configuralo para rechazar solicitudes no firmadas.'
+        );
+      }
+
       res.writeHead(200);
       res.end('OK');
 
       try {
-        const data = JSON.parse(body);
+        const data = JSON.parse(raw.toString('utf8'));
         const entry = data.entry?.[0];
         const changes = entry?.changes?.[0];
         const value = changes?.value;

@@ -18,10 +18,14 @@ primer handler de dominio en `src/domain/`:
 - Para internos crea `Ctx` real de `@proveeduria/agent` con origen `wamid`.
 - Para desconocidos aplica E11: audit + outbox generico, sin ejecutar tools.
 - Delega a un `DomainEngine` inyectable; el engine estructurado actual solo acepta payloads
-  `tool_call` ya normalizados y no reemplaza al loop Claude ni a extractores.
+  `tool_call` ya normalizados mediante `@proveeduria/agent` y no reemplaza al loop Claude
+  model-backed ni a extractores.
+- `src/outbox/dispatcher.ts` implementa el dispatcher transaccional de `outbox_messages`:
+  toma pendientes/fallidos con `FOR UPDATE SKIP LOCKED`, usa un `OutboxSender` inyectable,
+  marca `enviado` con `wamid_salida` o `fallido` con backoff exponencial.
 
-Pendiente para completar el camino runtime: consumidor real del broker, Claude/tool loop,
-extractores y dispatcher del outbox.
+Pendiente para completar el camino runtime productivo: consumidor real del broker,
+Claude/tool loop model-backed, extractores y sender real de Meta para el outbox.
 
 ## Invariantes del dominio
 

@@ -21,6 +21,9 @@ import type { InboundStore } from './db/inbound.js';
 import { PgInboundStore } from './db/inbound.js';
 import type { QueueClient } from './queue/index.js';
 import { AzureStorageQueue, InMemoryQueue } from './queue/index.js';
+import type { PortalStore } from './portal/types.js';
+import { PgPortalStore } from './portal/repo.js';
+import { manejarPortalApi } from './portal/routes.js';
 
 const { Pool } = pg;
 
@@ -31,6 +34,7 @@ export interface Dependencias {
   readonly config: Config;
   readonly store: InboundStore;
   readonly queue: QueueClient;
+  readonly portalStore: PortalStore;
 }
 
 function leerCuerpoCrudo(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
@@ -57,10 +61,14 @@ function encabezadoFirma(req: IncomingMessage): string {
 }
 
 export function crearManejador(deps: Dependencias) {
-  const { config, store, queue } = deps;
+  const { config, store, queue, portalStore } = deps;
 
   return async function manejar(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+
+    if (await manejarPortalApi(req, res, { store: portalStore })) {
+      return;
+    }
 
     // GET de verificacion (handshake de suscripcion).
     if (req.method === 'GET' && url.pathname === RUTA_WEBHOOK) {
@@ -153,9 +161,10 @@ function main(): void {
   const config = cargarConfig();
   const pool = new Pool({ connectionString: config.databaseUrl });
   const store = new PgInboundStore(pool);
+  const portalStore = new PgPortalStore(pool);
   const queue = crearQueue(config);
 
-  const manejar = crearManejador({ config, store, queue });
+  const manejar = crearManejador({ config, store, queue, portalStore });
   const server = createServer((req, res) => {
     manejar(req, res).catch((e: unknown) => {
       // eslint-disable-next-line no-console

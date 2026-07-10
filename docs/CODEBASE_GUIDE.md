@@ -13,10 +13,11 @@ Hay dos sistemas conviviendo:
 - **Sistema nuevo Modulo 1**: monorepo TypeScript en `packages/*` y `apps/*`. Este es el camino
   de produccion definido por `docs/EXECUTION_PLAN.md`.
 
-El sistema nuevo esta en **Fase 2a**. Ya existe la capa deterministica de tools para pedido/RFQ/
-cotizaciones hasta `pedido.estado = en_revision` con comparativo generado, y el worker ya tiene
-un handler/router de dominio inicial. Aun falta el loop Claude, extractores, broker real,
-dispatcher de outbox y portal.
+El sistema nuevo esta en **Fase 2a**. El hito navegable pedido -> cotizaciones -> comparativo
+ya existe con harness estructurado: tools deterministicas hasta `pedido.estado = en_revision`,
+worker domain handler/router, API REST de portal y `apps/portal` para navegar lista/detalle/
+comparativo. Aun falta endurecer el runtime productivo: prompt/modelo Claude, extractores,
+broker real y sender real de Meta para outbox.
 
 ## Mapa principal
 
@@ -29,8 +30,11 @@ dispatcher de outbox y portal.
   - `state-machine.md`: estados/transiciones del pedido.
   - `data-model.md`: tablas y cardinalidades.
   - `exceptions.md`: reglas E1-E13.
+  - `portal-api.md`: contrato REST del portal Fase 2a.
   - `templates-whatsapp.md`: plantillas candidatas de WhatsApp.
 - `docs/handoff/FASE2A-current-status.md`: estado operativo actual para continuar Fase 2a.
+- `docs/handoff/FASE2A-next-session-prompt.md`: prompt copy-paste para arrancar una sesion
+  nueva desde el punto exacto del cierre Fase 2a navegable.
 - `docs/handoff/FASE2A-slice1-pedido.md`: work order original de Slice 1.
 - `docs/AI_ASSISTED_DEVELOPMENT.md`: disciplina de trabajo con agentes.
 - `docs/DEPLOYMENT_COOKBOOK.md`: notas de despliegue/WhatsApp/Azure.
@@ -85,13 +89,16 @@ Runtime y tools deterministicas del agente.
   - `generarComparativo`
 - `src/tools/pedido.test.ts`: contrato unitario con fakes.
 - `src/tools/pedido.integration.test.ts`: flujo real contra Postgres efimero.
+- `src/agent/structured.ts`: extrae `tool_call` JSON whitelisted desde payload/texto.
+- `src/agent/tool-dispatcher.ts`: ejecuta las tools Fase 2a permitidas.
+- `src/agent/loop.ts`: loop deterministico con modelo opcional inyectable.
 
 Hoy estas tools se prueban directamente y el worker puede recibir un engine estructurado
-inyectable, pero aun falta el loop Claude que decida tool calls desde conversacion libre.
+inyectable. Falta conectar el adapter real de Claude/prompt humano para conversacion libre.
 
 ### `apps/api/`
 
-Webhook production-safe.
+Webhook production-safe + REST de portal.
 
 - `src/webhook/verify.ts`: verifica firma `X-Hub-Signature-256`.
 - `src/webhook/parse.ts`: parsea payload Meta.
@@ -99,8 +106,23 @@ Webhook production-safe.
 - `src/db/inbound.ts`: `PgInboundStore` + fake.
 - `src/queue/`: interfaz de cola y stub Azure.
 - `src/config.ts`: fail-closed para secretos/config.
+- `src/portal/`: endpoints `/api/portal/me`, `/api/portal/pedidos`,
+  `/api/portal/pedidos/:id` y `/api/portal/pedidos/:id/comparativo`.
 
-Flujo actual: payload Meta -> verificar/parsear -> `inbound_messages` -> queue.
+Flujo actual de webhook: payload Meta -> verificar/parsear -> `inbound_messages` -> queue.
+Flujo actual de portal: `X-User-Id` -> resolver roles/alcance -> SQL parametrizado ->
+JSON para `apps/portal`.
+
+### `apps/portal/`
+
+Portal nuevo Fase 2a, estatico y sin dependencias externas.
+
+- `src/index.html`: shell operativo para pedidos, detalle y comparativo.
+- `src/app.js`: cliente REST contra `/api/portal`, selector de usuario sembrado y filtros.
+- `src/styles.css`: UI responsive de trabajo, sin lecturas directas a Postgres/Supabase.
+- `scripts/build.mjs`: copia `src` a `dist`.
+- `scripts/check.mjs`: smoke test del contrato minimo.
+- `scripts/dev-server.mjs`: servidor estatico local.
 
 ### `apps/worker/`
 
@@ -114,11 +136,13 @@ Consumidor de cola y futuro motor de dominio.
 - `src/domain/e11.ts`: respuesta generica + audit/outbox para remitente desconocido.
 - `src/domain/structured-engine.ts`: engine temporal para payloads `tool_call` ya
   estructurados; no reemplaza Claude loop ni extractores.
+- `src/outbox/dispatcher.ts`: dispatcher de `outbox_messages` con `FOR UPDATE SKIP LOCKED`,
+  sender inyectable, `wamid_salida`, intentos y backoff.
 - `src/queue/`: consumidor in-memory para tests/stub.
 - `src/config.ts`: config del worker.
 
 El arranque por defecto sigue usando `echo` hasta tener broker/engine reales. El handler de
-dominio ya esta listo para inyectarse en tests o en wiring posterior.
+dominio y el dispatcher de outbox ya estan listos para inyectarse en tests o en wiring posterior.
 
 ### `server.js` y `dashboard/`
 
@@ -203,12 +227,26 @@ El flujo objetivo del Modulo 1 es:
 
 ## Flujo objetivo de Fase 2a
 
-Para completar el prototipo navegable:
+Hito navegable ya cubierto con harness estructurado:
 
-1. Integrar extractor estructurado para texto/voz/foto de pedido/cotizacion.
-2. Hacer que Claude invoque tools, pero sin decidir permisos ni saltarse guardas.
-3. Conectar broker real y dispatcher de outbox.
+1. Tools pedido/RFQ/cotizacion/comparativo.
+2. Worker handler/router + engine `tool_call` estructurado.
+3. API REST de portal.
 4. Portal: lista de pedidos, detalle, comparativo.
+
+Pendiente para runtime productivo sobre WhatsApp real:
+
+1. Integrar extractores texto/voz/foto hacia inputs estrictos.
+2. Conectar adapter real de Claude con prompt humano y goldens.
+3. Conectar broker real.
+4. Conectar sender real de Meta para `outbox_messages`.
+
+## Retomar en una sesion nueva
+
+Usa `docs/handoff/FASE2A-next-session-prompt.md` como prompt de arranque. Ese archivo lista
+los docs que hay que leer, el estado actual, la verificacion ya corrida y los proximos bloques
+pendientes. Antes de avanzar, confirmar `git status --short --branch` y respetar cualquier
+cambio existente sin modificar staging.
 
 ## Comandos de verificacion
 
@@ -230,6 +268,8 @@ timeout 90 bash -c 'until psql "$DATABASE_URL" -c "select 1" >/dev/null 2>&1; do
 npm run migrate
 npm run seed
 npm run test -w @proveeduria/agent -- --run src/tools/pedido.integration.test.ts
+npm run test -w @proveeduria/api -- --run src/portal/repo.integration.test.ts
+npm run test -w @proveeduria/worker -- --run src/outbox/dispatcher.integration.test.ts
 docker stop "$CID"
 ```
 

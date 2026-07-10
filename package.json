@@ -10,7 +10,7 @@
   ],
   "scripts": {
     "start": "node server.js",
-    "build:all": "npm run build -w @proveeduria/core -w @proveeduria/db -w @proveeduria/agent && npm run build -w @proveeduria/api -w @proveeduria/worker",
+    "build:all": "npm run build -w @proveeduria/core -w @proveeduria/db -w @proveeduria/agent && npm run build -w @proveeduria/api -w @proveeduria/worker -w @proveeduria/portal",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test:all": "npm run test --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",

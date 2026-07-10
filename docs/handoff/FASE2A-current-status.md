@@ -1,14 +1,18 @@
 # Handoff — Fase 2a estado actual
 
-Ultima actualizacion: despues de implementar `generarComparativo` deterministico en
-`packages/agent`.
+Ultima actualizacion: despues de completar el prototipo navegable Fase 2a con comparativo,
+API REST de portal, `apps/portal`, seam estructurado de agente y dispatcher de outbox.
+
+Para arrancar una sesion nueva sin reconstruir contexto, usa
+`docs/handoff/FASE2A-next-session-prompt.md`.
 
 ## Estado del proyecto segun `docs/EXECUTION_PLAN.md`
 
-El proyecto esta en **Fase 2a — Prototipo navegable**, pero aun no alcanza el hito completo
-de dia 30. La capa deterministica de tools ya cubre el flujo pedido hasta `en_revision` con
-comparativo generado, y el worker ya tiene handler/router de dominio inicial. Falta el loop
-Claude/extractores, broker/dispatcher reales y el portal.
+El proyecto esta en **Fase 2a — Prototipo navegable**. El hito navegable dia 30 ya queda
+cubierto con harness estructurado: flujo pedido -> RFQ -> cotizaciones -> `en_revision` ->
+comparativo, REST de portal y portal estatico nuevo. Lo que falta es endurecimiento de runtime
+productivo sobre WhatsApp real: prompt/modelo Claude, extractores, broker real y sender real
+de Meta para outbox.
 
 ## Ya implementado
 
@@ -63,6 +67,17 @@ En `packages/agent/src/runtime/`:
 - `repos.ts`: implementaciones PG con SQL parametrizado, incluido `PgComparativoRepo`.
 - `fakes.ts`: fakes en memoria con snapshot/rollback para unit tests.
 
+En `packages/agent/src/agent/`:
+
+- `structured.ts`
+  - Extrae `tool_call` JSON ya estructurado desde payload directo o texto JSON.
+  - Solo acepta tools whitelisted de Fase 2a.
+- `tool-dispatcher.ts`
+  - Mapea `tool_call.name` a las tools deterministicas implementadas.
+- `loop.ts`
+  - Ejecuta extractor estructurado primero y modelo inyectable despues.
+  - Audita `agent_turn_sin_tool` si no hay tool ejecutable.
+
 En `packages/db/migrations/005_pedidos_confirmacion.sql`:
 
 - Agrega `pedidos.confirmado_at` y `pedidos.confirmado_por`.
@@ -82,8 +97,32 @@ En `apps/worker/src/domain/`:
   - Para remitente desconocido encola respuesta generica por `outbox_messages` y registra
     `audit_event(remitente_desconocido)`.
 - `structured-engine.ts`
-  - Engine temporal para payloads `tool_call` ya estructurados.
-  - No reemplaza Claude loop ni extractores; solo deja el seam ejecutable y testeable.
+  - Engine temporal para payloads `tool_call` ya estructurados usando `@proveeduria/agent`.
+  - No reemplaza Claude loop model-backed ni extractores; solo deja el seam ejecutable y testeable.
+
+En `apps/worker/src/outbox/`:
+
+- `dispatcher.ts`
+  - Toma `outbox_messages` `pendiente|fallido` con `FOR UPDATE SKIP LOCKED`.
+  - Usa `OutboxSender` inyectable; no llama WhatsApp directo desde tools.
+  - Marca `enviado` con `wamid_salida`, o `fallido` con intentos y `next_retry_at`.
+
+En `apps/api/src/portal/`:
+
+- `routes.ts`
+  - Expone `/api/portal/me`, `/api/portal/pedidos`,
+    `/api/portal/pedidos/:pedidoId` y `/api/portal/pedidos/:pedidoId/comparativo`.
+  - Requiere `X-User-Id` de usuario activo.
+- `repo.ts`
+  - SQL parametrizado para lista/detalle/comparativo.
+  - `superadmin` y `admin_materiales` leen global; `ingeniero`/`bodeguero` quedan acotados
+    a `user_roles.project_id`.
+
+En `apps/portal/`:
+
+- Portal estatico sin dependencias externas.
+- Navega lista de pedidos, detalle, proveedores y comparativo consumiendo `/api/portal`.
+- No toca `dashboard/` legacy ni usa Supabase anon.
 
 ## Verificacion ya corrida
 
@@ -102,30 +141,34 @@ Tambien paso un integration test contra Postgres efimero con:
 - flujo real `crear -> confirmar -> sugerir -> enviar RFQ -> registrar 2 cotizaciones -> en_revision -> comparativo`
 - worker domain handler: `inbound_messages` real -> router interno -> `processed_at`, y E11
   desconocido -> `outbox_messages` + `audit_events`.
+- API portal: lista/detalle/comparativo desde SQL real.
+- Worker outbox dispatcher: fila real `outbox_messages` -> `enviado` con `wamid_salida`.
 
 Los tests estan en `packages/agent/src/tools/pedido.integration.test.ts` y
-`apps/worker/src/domain/handler.integration.test.ts`; solo corren si `DATABASE_URL`
-contiene `provee_test`, si no quedan skipped.
+`apps/worker/src/domain/handler.integration.test.ts`,
+`apps/worker/src/outbox/dispatcher.integration.test.ts` y
+`apps/api/src/portal/repo.integration.test.ts`; solo corren si `DATABASE_URL` contiene
+`provee_test`, si no quedan skipped.
 
-## Lo que falta para completar Fase 2a
+## Pendiente despues del hito navegable
 
-Siguiente bloque natural:
+No es necesario para navegar el flujo Fase 2a con datos de prueba, pero si para runtime
+productivo de WhatsApp:
 
 1. Claude/tool loop
    - Prompt de produccion lo edita el humano.
    - El agente solo decide tool calls dentro del contrato; permisos y excepciones quedan en tools.
 2. Extractores estructurados
    - Texto/voz/foto de pedido/cotizacion hacia inputs estrictos de tools.
-3. Broker/dispatcher reales
-   - Consumidor real de cola y envio de `outbox_messages` con `wamid_salida`/reintentos.
-4. Portal Fase 2a
-   - Lista de pedidos por estado.
-   - Detalle de pedido.
-   - Vista de comparativo.
+3. Broker real
+   - Sustituir stubs/in-memory por cola durable en API/worker.
+4. Sender real de Meta para outbox
+   - Implementar `OutboxSender` contra WhatsApp Cloud API con credenciales y observabilidad.
 
 ## Guardrails para la siguiente sesion
 
-- Leer primero `CLAUDE.md`, `packages/agent/CLAUDE.md`, este handoff y `docs/CODEBASE_GUIDE.md`.
+- Leer primero `CLAUDE.md`, `docs/CODEBASE_GUIDE.md`, este handoff y
+  `docs/handoff/FASE2A-next-session-prompt.md`.
 - No tocar `server.js` ni `dashboard/` para nuevas features de produccion; son referencia/prototipo.
 - No modificar `packages/core/src/types.ts` salvo que primero se cambie la spec.
 - No inventar schema; si falta una columna/tabla, actualizar `docs/specs/data-model.md` y crear
@@ -133,3 +176,14 @@ Siguiente bloque natural:
 - Todas las tools escriben dominio + audit + outbox/approval/review derivados en una transaccion.
 - Nada de envio WhatsApp directo desde tools.
 - Transiciones solo via `@proveeduria/core` y el trigger de DB como segunda barrera.
+
+## Estado de worktree esperado si se retoma antes de commit
+
+- Nada debe estar staged salvo que el humano lo haya pedido despues.
+- `server.js` y `dashboard/` no deben tener diff.
+- Los cambios nuevos del hito navegable viven en:
+  - `packages/agent/src/agent/`
+  - `apps/api/src/portal/`
+  - `apps/worker/src/outbox/`
+  - `apps/portal/`
+  - `docs/specs/portal-api.md`

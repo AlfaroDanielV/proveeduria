@@ -24,12 +24,18 @@ The production system is being built as an npm-workspaces monorepo alongside the
 - `packages/agent` — Fase 2a en progreso. Ya contiene runtime de tools deterministas
   (`withTx`, repos PG/fakes, audit, outbox, approval) y las tools de pedido/RFQ/cotizacion:
   `crearPedido`, `confirmarPedido`, `sugerirProveedores`, `enviarRfq`, `registrarCotizacion`,
-  `generarComparativo`. Aun faltan loop Claude, extractores reales y portal de pedidos.
-- `apps/api` — production-safe webhook ingest: verify `X-Hub-Signature-256` → dedup by `wamid` → persist → enqueue → 200; fail-closed (missing secret or prod-without-queue refuses to start).
+  `generarComparativo`. Tambien tiene el seam de agente Fase 2a para ejecutar `tool_call`
+  JSON whitelisted sin LLM. Aun faltan el prompt/modelo Claude de produccion y extractores
+  reales.
+- `apps/api` — production-safe webhook ingest: verify `X-Hub-Signature-256` → dedup by `wamid` → persist → enqueue → 200; fail-closed (missing secret or prod-without-queue refuses to start). Tambien expone REST de portal Fase 2a bajo `/api/portal/*` con `X-User-Id` como seam de auth interna.
 - `apps/worker` — queue-consumer stub plus Fase 2a domain handler/router: reads
   `inbound_messages`, resolves sender, creates `Ctx` for internal users, handles E11, and
-  delegates to an injectable domain engine. Broker real, Claude loop and outbox dispatcher are
-  still pending.
+  delegates to an injectable domain engine. Tiene dispatcher transaccional de outbox con
+  reintentos e interfaz de sender; broker real, Meta sender real, Claude loop model-backed y
+  extractores siguen pendientes.
+- `apps/portal` — portal nuevo de Fase 2a, estatico y sin dependencias externas. Consume
+  `/api/portal` para lista de pedidos, detalle y comparativo. No usa Supabase anon ni toca
+  `dashboard/` legacy.
 
 Commands (root): `npm install`; `npm run build:all`; `npm run typecheck`; `npm run test:all`; `DATABASE_URL=… npm run migrate && npm run seed`. CI is `.github/workflows/ci.yml` (build + typecheck + tests, plus an ephemeral-Postgres migration gate) — separate from the legacy Azure deploy workflows.
 
@@ -50,10 +56,13 @@ to `en_revision` in tests against real Postgres:
    automatically in the same transaction when the last complete quote moves the pedido to
    `en_revision`.
 
-The worker now has the domain handler/router seam, but the production Claude loop/extractors
-and real broker/outbox dispatcher are not wired yet.
+The worker now has the domain handler/router seam, structured tool-call execution, and the
+outbox dispatcher seam. The API/portal path can navigate pedidos and comparativos. The
+production Claude prompt/model adapter, extractors, real broker wiring, and real Meta sender
+are not wired yet.
 For navigation and future sessions, read `docs/CODEBASE_GUIDE.md` and
-`docs/handoff/FASE2A-current-status.md` before continuing.
+`docs/handoff/FASE2A-current-status.md` before continuing. If starting a fresh session, use
+`docs/handoff/FASE2A-next-session-prompt.md` as the copy-paste bootstrap.
 
 ## Commands
 

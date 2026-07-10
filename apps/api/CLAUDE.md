@@ -2,8 +2,9 @@
 
 Container App con ingress externo. En el Modulo 1 su unica responsabilidad de escritura
 es **ingerir el webhook de WhatsApp de forma segura y encolar**; el procesamiento de IA/OCR
-y la maquina de estados corren en `apps/worker`. Tambien expone REST autenticado para el
-portal (fases posteriores).
+y la maquina de estados corren en `apps/worker`. Tambien expone REST para el portal Fase 2a.
+El seam navegable de auth interna es `X-User-Id`; sesiones/cookies quedan para fase posterior
+antes de produccion.
 
 ## Controles NO negociables del webhook (EXECUTION_PLAN §1; data-model.md)
 
@@ -32,6 +33,9 @@ Fallar-cerrado: si falta el app secret o la firma, se rechaza; nunca se procesa 
 - `src/queue/` — interfaz `QueueClient` + impl in-memory (tests) y stub Azure Storage
   Queues / Postgres (prod). Aisla la cola detras de una interfaz (cookbook §1.4).
 - `src/db/` — acceso `pg` para `inbound_messages` (parametrizado, nunca SQL por string).
+- `src/portal/` — API read-only del portal: `/api/portal/me`, lista/detalle de pedidos y
+  comparativo deterministico. Usa `X-User-Id`, roles de `@proveeduria/core`/DB y alcance por
+  `user_roles.project_id`; no expone Postgres directo al navegador.
 - `src/index.ts` — `node:http` server que ata todo y lee config de env.
 
 No usar frameworks pesados; `node:http` alcanza. La logica va en funciones puras/inyectadas
@@ -40,4 +44,5 @@ para que los tests de `vitest` no abran sockets ni toquen la red.
 ## TS / imports
 
 ESM + NodeNext: imports relativos con extension `.js`. `import type` para tipos.
-`@proveeduria/core` resuelve a la fuente via `paths` (typecheck) y alias de vitest (tests).
+`@proveeduria/core` y `@proveeduria/agent` resuelven via workspace build; en tests se usa
+alias de vitest cuando aplica.

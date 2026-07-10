@@ -21,14 +21,18 @@ Implementado y verificado con unit tests + integration test contra Postgres efim
   - `enviarRfq`
   - `registrarCotizacion`
   - `generarComparativo`
+- `src/agent/`:
+  - `structured.ts`: extrae `tool_call` JSON ya estructurado desde payload/texto.
+  - `tool-dispatcher.ts`: whitelistea y ejecuta tools Fase 2a.
+  - `loop.ts`: turno deterministico con extractor estructurado primero y modelo inyectable
+    despues; audita `agent_turn_sin_tool` si no hay tool.
 
 No implementado aun:
 
-- Loop Claude/tool-use y prompt de produccion.
+- Prompt de produccion y adapter real Claude/tool-use.
 - Router conversacional del agente. El worker ya tiene una primera resolucion
   `interno|proveedor|desconocido` y crea `Ctx` para internos.
 - Extractores OCR/Vision/audio; `registrarCotizacion` recibe input ya estructurado.
-- Portal de pedidos/comparativo y dispatcher real de outbox.
 
 ## Limites (AI_ASSISTED_DEVELOPMENT.md §7 — donde NO delegar sin revision humana)
 
