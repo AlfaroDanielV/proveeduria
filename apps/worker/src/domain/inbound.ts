@@ -47,4 +47,11 @@ export class PgInboundMessageRepo implements InboundMessageRepo {
       [id, at],
     );
   }
+
+  async fijarConversacion(id: string, conversationId: string): Promise<void> {
+    await this.tx.query(
+      'UPDATE inbound_messages SET conversation_id = $2 WHERE id = $1',
+      [id, conversationId],
+    );
+  }
 }

@@ -5,14 +5,24 @@ C0–C2 del plan maestro (`docs/PLAN_FASE2A_2B_CONTROL_CENTER.md` — leerlo ant
 continuar; el §Progreso ahi es el estado canonico). **714 tests, 0 skips**, con
 integracion real contra Postgres 16 y las 10 migraciones.
 
-Hito mayor: el flujo `borrador → cotizando → en_revision → aprobado → ordenado` es
-operable END-TO-END desde el portal web con auth real (bandeja de aprobaciones: enviar
-RFQs, adjudicar desde el comparativo con snapshot D5, emitir OCs con PDF determinista
-enviado por WhatsApp via outbox + link firmado), y por WhatsApp estructurado via worker.
-Bloques B3 (`aprobar_ganador`), B4 (`emitir_oc` + endpoint publico de attachments +
-sender con documento) y C2 (bandeja) completos y verificados. Falta de Fase 2a: A4
-conversaciones, A5 loop Claude, A6 extractores/camino del proveedor, A7 cron E1. Falta de
-2b: B5 `registrar_factura` en adelante. Migraciones aplicadas: 001–010.
+## FASE 2A FUNCIONALMENTE COMPLETA (774 tests, doble pasada estable, migraciones 001–011)
+
+El flujo `borrador → cotizando → en_revision → aprobado → ordenado` es operable
+END-TO-END por TRES canales: portal web con auth real (bandeja de aprobaciones completa),
+WhatsApp conversacional (loop Claude con registry unico, historial persistido A4, maximo
+5 pasos, gating del seam estructurado) y WhatsApp estructurado (dev). El camino del
+proveedor esta vivo: media de Meta → attachment_blobs, extractores texto/Vision/Whisper
+(tool forzada, AGENT_EXTRACT_MODEL default haiku) → `registrar_cotizacion` como actor
+sistema → E2/review/transicion/comparativo automaticos; BAJA interceptada en el engine.
+Cron E1 con lock advisory cierra el contrato de vencimientos.
+
+**Bloqueado en el humano antes del piloto**: (1) revisar/editar el prompt
+(`packages/agent/src/agent/prompt.ts`, borrador marcado — AI_DEV §7); (2) someter las 7
+plantillas a Meta (texto listo con marca Atemporal); (3) credenciales reales
+(META_APP_SECRET/TOKEN/PHONE_NUMBER_ID, ANTHROPIC_API_KEY, AZURE_STORAGE_QUEUE_CONNECTION,
+PORTAL_JWT_SECRET, ATTACHMENTS_LINK_SECRET, PUBLIC_API_URL; opcional OPENAI_API_KEY para
+audio) y smoke real; (4) COMMIT del working tree (~170 archivos sin commitear). Falta de
+2b: B5 `registrar_factura` en adelante; del portal: olas 2–3; e infra D (deploy/cutover).
 
 Para arrancar una sesion nueva sin reconstruir contexto, usa
 `docs/handoff/FASE2A-next-session-prompt.md`.

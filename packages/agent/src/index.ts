@@ -56,6 +56,7 @@ export * from './runtime/audit.js';
 export * from './runtime/outbox.js';
 export * from './runtime/repos.js';
 export * from './runtime/context.js';
+export * from './runtime/context-sistema.js';
 export * from './runtime/approval-ganador.js';
 // Fakes de testing (FakeToolStore/crearFakeRepos/crearFakeCtx/withFakeCtx): expuestos desde
 // el paquete para que otros workspaces (p.ej. apps/api, tests de rutas del portal) puedan
@@ -64,9 +65,15 @@ export * from './runtime/approval-ganador.js';
 export * from './runtime/fakes.js';
 export * from './pdf/oc-pdf.js';
 export * from './tools/pedido.js';
+export * from './tools/vencimientos.js';
 export * from './tools/adjudicacion.js';
 export * from './tools/oc.js';
+export * from './agent/registry.js';
+export * from './agent/prompt.js';
 export * from './agent/types.js';
 export * from './agent/structured.js';
 export * from './agent/tool-dispatcher.js';
 export * from './agent/loop.js';
+export * from './agent/conversacional.js';
+export * from './agent/anthropic.js';
+export * from './extractores/cotizacion.js';

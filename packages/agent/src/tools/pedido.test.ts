@@ -9,6 +9,7 @@ import {
   sugerirProveedores,
 } from './pedido.js';
 import { crearFakeCtx, FakeToolStore, withFakeCtx } from '../runtime/fakes.js';
+import { ACTOR_SISTEMA } from '../runtime/context-sistema.js';
 import type {
   Actor,
   Pedido,
@@ -825,6 +826,48 @@ describe('registrarCotizacion', () => {
         portal_path: '/pedidos/pedido-1/comparativo',
       },
     });
+  });
+
+  it('acepta el ACTOR SISTEMA (via flujo proveedor) aunque no tenga roles', async () => {
+    // tools.md §registrar_cotizacion "Actor": el mensaje de proveedor corre como actor sistema
+    // (sin roles); la tool lo acepta SOLO por esa via.
+    const store = storeBase();
+    agregarPedidoConItems(store, pedidoBase({ estado: 'cotizando' }));
+    store.quoteRequests.push(quoteRequestBase());
+    const ctx = crearFakeCtx(store, ACTOR_SISTEMA, AHORA);
+
+    const result = await registrarCotizacion({
+      quoteRequestId: 'quote-request-1',
+      fuente: 'texto',
+      confianzaExtraccion: 0.95,
+      items: [
+        { pedidoItemId: 'item-1', precioUnitario: 4500, cantidad: 10, disponible: true },
+        { pedidoItemId: 'item-2', precioUnitario: 1200, cantidad: 25, disponible: true },
+      ],
+    }, ctx);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error.mensaje);
+    expect(store.quoteResponses).toHaveLength(1);
+  });
+
+  it('rechaza a un actor con rol insuficiente (ingeniero) — no relaja la validacion por roles', async () => {
+    const store = storeBase();
+    agregarPedidoConItems(store, pedidoBase({ estado: 'cotizando' }));
+    store.quoteRequests.push(quoteRequestBase());
+    const ctx = crearFakeCtx(store, actorIngeniero, AHORA);
+
+    const result = await registrarCotizacion({
+      quoteRequestId: 'quote-request-1',
+      fuente: 'texto',
+      confianzaExtraccion: 0.95,
+      items: [{ pedidoItemId: 'item-1', precioUnitario: 4500, cantidad: 10, disponible: true }],
+    }, ctx);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('no deberia permitir a un ingeniero');
+    expect(result.error.codigo).toBe('rol_insuficiente');
+    expect(store.quoteResponses).toHaveLength(0);
   });
 
   it('registra E2 incompleta y encola repregunta al proveedor sin marcar respondida', async () => {

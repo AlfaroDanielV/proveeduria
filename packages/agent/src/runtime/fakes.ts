@@ -16,9 +16,12 @@ import type {
   CoberturaRepo,
   CreditNote,
   CreditNoteRepo,
+  ConversacionRepo,
+  ConversacionUpsertResultado,
   Ctx,
   DashboardLink,
   DashboardLinkRepo,
+  DireccionMensajeHistorial,
   EquipmentMovement,
   EquipmentMovementInput,
   EquipmentMovementResultado,
@@ -34,6 +37,8 @@ import type {
   InvoicePoLinkRepo,
   InvoiceRepo,
   ItemPedidoInput,
+  MensajeHistorial,
+  NuevaConversacionInput,
   NuevaCreditNote,
   NuevaInvoice,
   NuevaOc,
@@ -63,6 +68,7 @@ import type {
   QuoteItemInput,
   QuoteRequest,
   QuoteRequestRepo,
+  RfqActivaProveedor,
   QuoteResponse,
   QuoteResponseRepo,
   ReceiptConfirmation,
@@ -88,11 +94,73 @@ export class FakeTx implements Tx {
   }
 }
 
+// ---------------------------------------------------------------------------
+// conversations (docs/specs/agente-conversacional.md §A4). Espejo en memoria de
+// PgConversacionRepo (repos.ts). `packages/agent` no tiene, fuera de esto, ningun concepto
+// de "mensaje entrante" (eso vive en `apps/worker`/`inbound_messages`): `mensajesEntrantes`
+// es una costura de testing nueva para poder simular el lado "entrante" del historial sin
+// abrir Postgres; se puebla con `FakeToolStore.agregarMensajeEntrante`. El lado "saliente"
+// reusa el sink de `ctx.outbox` ya existente, pero con un timestamp (`historialSalientes`,
+// poblado por `crearFakeCtx` en el mismo cierre que llena `outboxMessages`) porque
+// `OutboxMessage` (el tipo publico de `ctx.outbox`) no trae fecha.
+// ---------------------------------------------------------------------------
+
+interface ConversacionFake {
+  readonly id: string;
+  readonly phone: string;
+  readonly userId: string | null;
+  readonly supplierContactId: string | null;
+  readonly lastMessageAt: Date;
+  readonly ventana24hExpiraAt: Date;
+}
+
+interface MensajeEntranteFake {
+  readonly phone: string;
+  readonly texto: string;
+  readonly at: Date;
+}
+
+interface HistorialSalienteFake {
+  readonly destino: string;
+  readonly texto: string | null;
+  readonly template: string | null;
+  readonly at: Date;
+}
+
+/** 24h en ms — misma constante que `PgConversacionRepo` (repos.ts), duplicada a proposito. */
+const VENTANA_24H_MS = 24 * 60 * 60 * 1000;
+
+/** Espejo de `candidatosTelefono` en repos.ts (mismo problema de formato '+'/sin '+'). */
+function candidatosTelefono(phone: string): readonly string[] {
+  const trimmed = phone.trim();
+  if (trimmed === '') return [trimmed];
+  return trimmed.startsWith('+') ? [trimmed, trimmed.slice(1)] : [trimmed, `+${trimmed}`];
+}
+
+function cloneConversacion(c: ConversacionFake): ConversacionFake {
+  return {
+    ...c,
+    lastMessageAt: new Date(c.lastMessageAt.getTime()),
+    ventana24hExpiraAt: new Date(c.ventana24hExpiraAt.getTime()),
+  };
+}
+
+function cloneMensajeEntrante(m: MensajeEntranteFake): MensajeEntranteFake {
+  return { ...m, at: new Date(m.at.getTime()) };
+}
+
+function cloneHistorialSaliente(h: HistorialSalienteFake): HistorialSalienteFake {
+  return { ...h, at: new Date(h.at.getTime()) };
+}
+
 interface FakeSnapshot {
   readonly proyectos: Map<string, Proyecto>;
   readonly pedidos: Map<string, Pedido>;
   readonly itemsPorPedido: Map<string, PedidoItem[]>;
   readonly proveedores: Map<string, Proveedor>;
+  readonly conversaciones: ConversacionFake[];
+  readonly mensajesEntrantes: MensajeEntranteFake[];
+  readonly historialSalientes: HistorialSalienteFake[];
   readonly quoteRequests: QuoteRequest[];
   readonly quoteResponses: QuoteResponse[];
   readonly quoteItems: QuoteItem[];
@@ -254,6 +322,9 @@ export class FakeToolStore {
   pedidos = new Map<string, Pedido>();
   itemsPorPedido = new Map<string, PedidoItem[]>();
   proveedores = new Map<string, Proveedor>();
+  conversaciones: ConversacionFake[] = [];
+  mensajesEntrantes: MensajeEntranteFake[] = [];
+  historialSalientes: HistorialSalienteFake[] = [];
   quoteRequests: QuoteRequest[] = [];
   quoteResponses: QuoteResponse[] = [];
   quoteItems: QuoteItem[] = [];
@@ -296,6 +367,15 @@ export class FakeToolStore {
     this.proveedores.set(proveedor.id, cloneProveedor(proveedor));
   }
 
+  /**
+   * Semilla del lado "entrante" del historial (agente-conversacional.md §A4), para tests de
+   * `FakeConversacionRepo.historialPorTelefono`: `packages/agent` no modela
+   * `inbound_messages` en ningun otro lugar (eso vive en `apps/worker`).
+   */
+  agregarMensajeEntrante(mensaje: MensajeEntranteFake): void {
+    this.mensajesEntrantes.push(cloneMensajeEntrante(mensaje));
+  }
+
   snapshot(): FakeSnapshot {
     return {
       proyectos: new Map(
@@ -316,6 +396,9 @@ export class FakeToolStore {
           cloneProveedor(proveedor),
         ]),
       ),
+      conversaciones: this.conversaciones.map(cloneConversacion),
+      mensajesEntrantes: this.mensajesEntrantes.map(cloneMensajeEntrante),
+      historialSalientes: this.historialSalientes.map(cloneHistorialSaliente),
       quoteRequests: this.quoteRequests.map(cloneQuoteRequest),
       quoteResponses: this.quoteResponses.map(cloneQuoteResponse),
       quoteItems: this.quoteItems.map(cloneQuoteItem),
@@ -366,6 +449,9 @@ export class FakeToolStore {
     this.pedidos = snapshot.pedidos;
     this.itemsPorPedido = snapshot.itemsPorPedido;
     this.proveedores = snapshot.proveedores;
+    this.conversaciones = snapshot.conversaciones;
+    this.mensajesEntrantes = snapshot.mensajesEntrantes;
+    this.historialSalientes = snapshot.historialSalientes;
     this.quoteRequests = snapshot.quoteRequests;
     this.quoteResponses = snapshot.quoteResponses;
     this.quoteItems = snapshot.quoteItems;
@@ -591,6 +677,72 @@ class FakeProveedorRepo implements ProveedorRepo {
   }
 }
 
+// ---------------------------------------------------------------------------
+// conversations (docs/specs/agente-conversacional.md §A4). Espejo de PgConversacionRepo.
+// ---------------------------------------------------------------------------
+
+class FakeConversacionRepo implements ConversacionRepo {
+  constructor(private readonly store: FakeToolStore) {}
+
+  async upsertPorTelefono(input: NuevaConversacionInput): Promise<ConversacionUpsertResultado> {
+    const expiraAt = new Date(input.recibidoAt.getTime() + VENTANA_24H_MS);
+    const index = this.store.conversaciones.findIndex((c) => c.phone === input.phone);
+    if (index === -1) {
+      const conversacion: ConversacionFake = {
+        id: this.store.nextId('conversacion'),
+        phone: input.phone,
+        userId: input.userId ?? null,
+        supplierContactId: input.supplierContactId ?? null,
+        lastMessageAt: new Date(input.recibidoAt.getTime()),
+        ventana24hExpiraAt: expiraAt,
+      };
+      this.store.conversaciones.push(conversacion);
+      return { id: conversacion.id };
+    }
+
+    const existente = this.store.conversaciones[index] as ConversacionFake;
+    const actualizada: ConversacionFake = {
+      ...existente,
+      userId: input.userId ?? existente.userId,
+      supplierContactId: input.supplierContactId ?? existente.supplierContactId,
+      lastMessageAt: new Date(input.recibidoAt.getTime()),
+      ventana24hExpiraAt: expiraAt,
+    };
+    this.store.conversaciones[index] = actualizada;
+    return { id: actualizada.id };
+  }
+
+  async ventanaVigente(phone: string, ahora: Date): Promise<boolean> {
+    const candidatos = candidatosTelefono(phone);
+    return this.store.conversaciones.some((c) => (
+      candidatos.includes(c.phone) && c.ventana24hExpiraAt.getTime() > ahora.getTime()
+    ));
+  }
+
+  async historialPorTelefono(
+    phone: string,
+    limite = 20,
+  ): Promise<readonly MensajeHistorial[]> {
+    const candidatos = candidatosTelefono(phone);
+    const entrantes: MensajeHistorial[] = this.store.mensajesEntrantes
+      .filter((m) => candidatos.includes(m.phone))
+      .map((m) => ({ direccion: 'entrante' as DireccionMensajeHistorial, texto: m.texto, at: m.at }));
+    const salientes: MensajeHistorial[] = this.store.historialSalientes
+      .filter((m) => candidatos.includes(m.destino))
+      .map((m) => ({
+        direccion: 'saliente' as DireccionMensajeHistorial,
+        texto: m.texto ?? `[plantilla ${m.template ?? '?'}]`,
+        at: m.at,
+      }));
+
+    return [...entrantes, ...salientes]
+      .sort((a, b) => b.at.getTime() - a.at.getTime())
+      .slice(0, limite)
+      .sort((a, b) => a.at.getTime() - b.at.getTime())
+      .map((m) => ({ ...m, at: new Date(m.at.getTime()) }));
+  }
+}
+
 class FakeQuoteRequestRepo implements QuoteRequestRepo {
   constructor(private readonly store: FakeToolStore) {}
 
@@ -638,6 +790,29 @@ class FakeQuoteRequestRepo implements QuoteRequestRepo {
       return actualizada;
     });
     return afectadas;
+  }
+
+  async rfqsActivasPorContacto(
+    supplierContactId: string,
+  ): Promise<readonly RfqActivaProveedor[]> {
+    // El fake no modela `supplier_contacts` como tabla aparte: el contacto vive en
+    // `Proveedor.contactoPrincipal`. Resolvemos contacto -> proveedor -> supplierId igual que
+    // el join de PgQuoteRequestRepo.rfqsActivasPorContacto.
+    const proveedor = [...this.store.proveedores.values()].find(
+      (p) => p.contactoPrincipal?.id === supplierContactId,
+    );
+    if (proveedor === undefined) return [];
+    return this.store.quoteRequests
+      .filter((qr) => qr.supplierId === proveedor.id && qr.estado === 'enviada')
+      .map((qr) => {
+        const pedido = this.store.pedidos.get(qr.pedidoId);
+        return {
+          quoteRequestId: qr.id,
+          pedidoId: qr.pedidoId,
+          pedidoNumero: pedido?.numero ?? qr.pedidoId,
+          supplierId: qr.supplierId,
+        } satisfies RfqActivaProveedor;
+      });
   }
 }
 
@@ -1279,6 +1454,7 @@ export function crearFakeRepos(store: FakeToolStore): Repos {
     pedidoItems: new FakePedidoItemRepo(store),
     usuarios: new FakeUsuarioRepo(store),
     proveedores: new FakeProveedorRepo(store),
+    conversaciones: new FakeConversacionRepo(store),
     quoteRequests: new FakeQuoteRequestRepo(store),
     quoteResponses: new FakeQuoteResponseRepo(store),
     comparativos: new FakeComparativoRepo(store),
@@ -1317,6 +1493,15 @@ export function crearFakeCtx(
     outbox: async (message) => {
       if (store.failOutbox) throw new Error('Fallo de outbox fake.');
       store.outboxMessages.push({ ...message });
+      // Espejo con timestamp para FakeConversacionRepo.historialPorTelefono: `OutboxMessage`
+      // (el tipo publico de ctx.outbox) no trae fecha, asi que se registra aparte usando el
+      // `ahora` de este Ctx (agente-conversacional.md §A4 "Historial para el loop").
+      store.historialSalientes.push({
+        destino: message.destino,
+        texto: message.texto ?? null,
+        template: message.template ?? null,
+        at: new Date(ahora.getTime()),
+      });
     },
     approval: async (event) => {
       if (store.failApproval) throw new Error('Fallo de aprobacion fake.');

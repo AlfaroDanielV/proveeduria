@@ -36,6 +36,7 @@ Contrato de cada herramienta expuesta al agente Claude. Reglas transversales:
 
 ### `registrar_cotizacion`
 - **Contexto**: mensaje de proveedor (o reenvío manual de Proveeduría — E2/adopción).
+- **Actor** (agente-conversacional.md §A6): el mensaje de proveedor se ejecuta como **actor sistema** (`actor_sistema=true`, sin roles, origen `wamid`) con el `quote_request_id` resuelto determinísticamente por remitente (contacto → proveedor → RFQ `enviada`); la tool acepta actor sistema SOLO por esa vía. La entrada con roles internos (`admin_materiales`, `superadmin`) queda para el reenvío manual.
 - **Input**: quote_request_id (resuelto por remitente + pedido activo), fuente (texto/imagen/pdf/audio → extractor correspondiente), condiciones?, plazo_entrega?, confianza_extraccion, items[{pedido_item_id?, precio_unitario?, cantidad?, disponible?, notas?}]. La tool recibe el resultado estructurado del extractor/router; no hace OCR/LLM.
 - **Efecto**: `quote_response` + `quote_items` con `confianza_extraccion`; si incompleta → E2 (repregunta por outbox, máx 2; al tercer fallo escala a `review_queue`). Cuando todas responden completas o vence plazo → `cotizando→en_revision` y se genera el comparativo.
 

@@ -20,6 +20,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.111.0",
     "@proveeduria/core": "*",
     "pdfkit": "^0.19.1",
     "pg": "^8.13.1"

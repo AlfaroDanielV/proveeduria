@@ -58,6 +58,32 @@ export interface WorkerConfig {
   readonly claimLeaseSegundos: number;
   /** Tamano del batch que reclama el dispatcher por ciclo (`OUTBOX_BATCH`). */
   readonly outboxBatch: number;
+  /**
+   * Intervalo de polling del cron E1 de vencimiento de plazos, en ms
+   * (`WORKER_CRON_POLL_MS`, default 60000). Solo se activa con `DATABASE_URL` (necesita el
+   * advisory lock y los repos de Postgres — ver `planificarArranque`).
+   */
+  readonly cronPollMs: number;
+  /**
+   * API key de Anthropic (`ANTHROPIC_API_KEY`, opcional). Su presencia decide el gating del
+   * engine de dominio (spec §A5): con key -> engine conversacional Claude (y el seam de
+   * `tool_call`-en-texto queda apagado); sin key -> structured-engine actual (dev).
+   */
+  readonly anthropicApiKey?: string;
+  /** Modelo Claude del agente (`AGENT_MODEL`, default `claude-sonnet-5`). */
+  readonly agentModel: string;
+  /**
+   * API key de OpenAI (`OPENAI_API_KEY`, opcional). Solo la usa el extractor de cotizaciones
+   * (A6) para transcribir audio con Whisper; sin ella, el audio de un proveedor no se procesa
+   * y el engine repregunta (docs/specs/agente-conversacional.md §A6).
+   */
+  readonly openaiApiKey?: string;
+  /**
+   * Modelo Claude del extractor de cotizaciones (`AGENT_EXTRACT_MODEL`, default
+   * `claude-haiku-4-5-20251001`): extraccion barata (EXECUTION_PLAN §5), distinta del modelo
+   * conversacional (`AGENT_MODEL`).
+   */
+  readonly agentExtractModel: string;
 }
 
 const DEFAULTS = {
@@ -69,6 +95,9 @@ const DEFAULTS = {
   metaGraphUrl: 'https://graph.facebook.com/v23.0',
   claimLeaseSegundos: 300,
   outboxBatch: 20,
+  cronPollMs: 60000,
+  agentModel: 'claude-sonnet-5',
+  agentExtractModel: 'claude-haiku-4-5-20251001',
 } as const;
 
 function parseOutboxMode(raw: string | undefined): OutboxMode {
@@ -101,6 +130,11 @@ export function cargarConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig
     DEFAULTS.claimLeaseSegundos,
   );
   const outboxBatch = parseEnteroPositivo(env.OUTBOX_BATCH, DEFAULTS.outboxBatch);
+  const cronPollMs = parseEnteroPositivo(env.WORKER_CRON_POLL_MS, DEFAULTS.cronPollMs);
+  const anthropicApiKey = env.ANTHROPIC_API_KEY?.trim();
+  const agentModel = env.AGENT_MODEL?.trim() || DEFAULTS.agentModel;
+  const openaiApiKey = env.OPENAI_API_KEY?.trim();
+  const agentExtractModel = env.AGENT_EXTRACT_MODEL?.trim() || DEFAULTS.agentExtractModel;
 
   // Falla-cerrado: en modo `meta` sin credenciales/secretos, el dispatcher arrancaria pero
   // cada envio fallaria (o peor, se descartaria como permanente, o un documento por
@@ -137,6 +171,11 @@ export function cargarConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig
     ...(attachmentsLinkSecret ? { attachmentsLinkSecret } : {}),
     claimLeaseSegundos,
     outboxBatch,
+    cronPollMs,
+    ...(anthropicApiKey ? { anthropicApiKey } : {}),
+    agentModel,
+    ...(openaiApiKey ? { openaiApiKey } : {}),
+    agentExtractModel,
   };
 }
 

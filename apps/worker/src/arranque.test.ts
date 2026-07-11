@@ -17,6 +17,9 @@ function config(overrides: Partial<WorkerConfig> = {}): WorkerConfig {
     metaGraphUrl: 'https://graph.facebook.com/v23.0',
     claimLeaseSegundos: 300,
     outboxBatch: 20,
+    cronPollMs: 60000,
+    agentModel: 'claude-sonnet-5',
+    agentExtractModel: 'claude-haiku-4-5-20251001',
     ...overrides,
   };
 }
@@ -28,6 +31,8 @@ describe('planificarArranque', () => {
       handler: 'echo',
       consumer: 'memoria',
       outbox: 'off',
+      engine: 'estructurado',
+      cron: false,
       advertencias: [],
     });
   });
@@ -58,6 +63,8 @@ describe('planificarArranque', () => {
       handler: 'dominio',
       consumer: 'azure',
       outbox: 'off',
+      engine: 'estructurado',
+      cron: true,
       advertencias: [],
     });
   });
@@ -74,6 +81,8 @@ describe('planificarArranque', () => {
       handler: 'dominio',
       consumer: 'azure',
       outbox: 'console',
+      engine: 'estructurado',
+      cron: true,
       advertencias: [],
     });
   });
@@ -119,6 +128,8 @@ describe('planificarArranque', () => {
       handler: 'dominio',
       consumer: 'azure',
       outbox: 'meta',
+      engine: 'estructurado',
+      cron: true,
       advertencias: [],
     });
   });
@@ -137,5 +148,42 @@ describe('planificarArranque', () => {
     expect(plan.outbox).toBe('meta');
     expect(plan.advertencias).toHaveLength(1);
     expect(plan.advertencias[0]).toContain('AZURE_STORAGE_QUEUE_CONNECTION');
+  });
+
+  it('sin DATABASE_URL: cron E1 apagado (necesita Postgres)', () => {
+    expect(planificarArranque(config()).cron).toBe(false);
+    // Tampoco lo enciende pedir outbox console/meta sin DB.
+    expect(planificarArranque(config({ outboxMode: 'console' })).cron).toBe(false);
+  });
+
+  it('con DATABASE_URL: cron E1 encendido (con o sin Azure)', () => {
+    expect(planificarArranque(config({ databaseUrl: 'postgres://x' })).cron).toBe(true);
+    expect(
+      planificarArranque(
+        config({ databaseUrl: 'postgres://x', azureQueueConnection: 'UseDevelopmentStorage=true' }),
+      ).cron,
+    ).toBe(true);
+  });
+
+  it('sin ANTHROPIC_API_KEY: engine estructurado (gating §A5)', () => {
+    expect(planificarArranque(config()).engine).toBe('estructurado');
+    expect(planificarArranque(config({ databaseUrl: 'postgres://x' })).engine).toBe('estructurado');
+  });
+
+  it('con ANTHROPIC_API_KEY: engine claude (seam tool_call-en-texto apagado)', () => {
+    expect(planificarArranque(config({ anthropicApiKey: 'sk-ant-xyz' })).engine).toBe('claude');
+    const plan = planificarArranque(
+      config({ databaseUrl: 'postgres://x', anthropicApiKey: 'sk-ant-xyz' }),
+    );
+    expect(plan).toEqual({
+      handler: 'dominio',
+      consumer: 'memoria',
+      outbox: 'off',
+      engine: 'claude',
+      cron: true,
+      advertencias: [
+        'DATABASE_URL presente sin AZURE_STORAGE_QUEUE_CONNECTION: se usa InMemoryConsumer (solo dev/test, no durable).',
+      ],
+    });
   });
 });

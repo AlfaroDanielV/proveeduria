@@ -39,6 +39,7 @@ pausa). Falta: conversaciones (A4), loop Claude model-backed (A5), extractores (
   - `broker-colas.md`: contrato del broker de ingesta api→worker (wire format, visibility, veneno).
   - `outbox-whatsapp.md`: dispatcher claim→send→mark, taxonomia de errores Meta, statuses.
   - `control-center.md`: portal interno — auth real, matriz de permisos web, pantallas por olas.
+  - `agente-conversacional.md`: A4–A7 — conversaciones/ventana 24h, loop Claude, extractores, cron E1.
 - `docs/handoff/FASE2A-current-status.md`: estado operativo actual para continuar Fase 2a.
 - `docs/handoff/FASE2A-next-session-prompt.md`: prompt copy-paste para arrancar una sesion
   nueva desde el punto exacto del cierre Fase 2a navegable.

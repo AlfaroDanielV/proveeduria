@@ -1,50 +1,31 @@
-import type { ResultadoTool } from '../runtime/types.js';
-import { aprobarGanador } from '../tools/adjudicacion.js';
-import { emitirOc } from '../tools/oc.js';
-import {
-  confirmarPedido,
-  crearPedido,
-  enviarRfq,
-  generarComparativo,
-  registrarCotizacion,
-  sugerirProveedores,
-} from '../tools/pedido.js';
-import type { Ctx } from '../runtime/types.js';
+import type { Ctx, ResultadoTool } from '../runtime/types.js';
+import { TOOLS_REGISTRY } from './registry.js';
+import type { RegistroTool } from './registry.js';
 import type { ResultadoToolCall, ToolCallEstructurado, ToolFase2a } from './types.js';
 
-export const TOOLS_FASE_2A: readonly ToolFase2a[] = [
-  'crear_pedido',
-  'confirmar_pedido',
-  'sugerir_proveedores',
-  'enviar_rfq',
-  'registrar_cotizacion',
-  'generar_comparativo',
-  'aprobar_ganador',
-  'emitir_oc',
-] as const;
+/**
+ * Lista de nombres whitelisteados, derivada del registro unico (registry.ts). Antes se
+ * mantenia a mano aca ademas de en `types.ts` y `structured.ts`; ahora hay una sola fuente
+ * (agente-conversacional.md §A5).
+ */
+export const TOOLS_FASE_2A: readonly ToolFase2a[] = TOOLS_REGISTRY.map((t) => t.name);
+
+/** Indice nombre -> entrada del registro, para despachar en O(1) sin `switch` duplicado. */
+const REGISTRO_POR_NOMBRE: ReadonlyMap<ToolFase2a, RegistroTool> = new Map(
+  TOOLS_REGISTRY.map((t): readonly [ToolFase2a, RegistroTool] => [t.name, t]),
+);
 
 export async function ejecutarToolFase2a(
   call: ToolCallEstructurado,
   ctx: Ctx,
 ): Promise<ResultadoTool<unknown>> {
-  switch (call.name) {
-    case 'crear_pedido':
-      return crearPedido(call.input, ctx);
-    case 'confirmar_pedido':
-      return confirmarPedido(call.input, ctx);
-    case 'sugerir_proveedores':
-      return sugerirProveedores(call.input, ctx);
-    case 'enviar_rfq':
-      return enviarRfq(call.input, ctx);
-    case 'registrar_cotizacion':
-      return registrarCotizacion(call.input, ctx);
-    case 'generar_comparativo':
-      return generarComparativo(call.input, ctx);
-    case 'aprobar_ganador':
-      return aprobarGanador(call.input, ctx);
-    case 'emitir_oc':
-      return emitirOc(call.input, ctx);
+  const tool = REGISTRO_POR_NOMBRE.get(call.name);
+  if (tool === undefined) {
+    // Inalcanzable: `call.name` es `ToolFase2a` y el registro cubre todos los nombres.
+    // Defensivo por si el tipo se relaja en el futuro.
+    throw new Error(`Tool no registrada en TOOLS_REGISTRY: ${String(call.name)}.`);
   }
+  return tool.ejecutar(ctx, call.input);
 }
 
 export async function ejecutarToolCallFase2a(

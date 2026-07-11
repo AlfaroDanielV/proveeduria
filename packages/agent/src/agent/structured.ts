@@ -1,20 +1,15 @@
+import { TOOLS_REGISTRY } from './registry.js';
 import type { ToolCallEstructurado, ToolFase2a } from './types.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/** Whitelist de nombres derivada del registro unico (registry.ts) — sin lista duplicada. */
+const NOMBRES_FASE_2A: ReadonlySet<string> = new Set(TOOLS_REGISTRY.map((t) => t.name));
+
 export function esToolFase2a(name: string): name is ToolFase2a {
-  return (
-    name === 'crear_pedido' ||
-    name === 'confirmar_pedido' ||
-    name === 'sugerir_proveedores' ||
-    name === 'enviar_rfq' ||
-    name === 'registrar_cotizacion' ||
-    name === 'generar_comparativo' ||
-    name === 'aprobar_ganador' ||
-    name === 'emitir_oc'
-  );
+  return NOMBRES_FASE_2A.has(name);
 }
 
 function textoDePayload(payload: unknown): string | null {

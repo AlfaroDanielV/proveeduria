@@ -45,8 +45,28 @@ Ctx.origen='web'; mapeo de errores tool→HTTP documentado; UI: EnviarRfqsPanel 
 opt-in, AdjudicacionPanel por ítem desde el comparativo con agrupación por proveedor,
 EmitirOcPanel, HistorialAprobaciones con evidencia D5; integración end-to-end HTTP real
 borrador→ordenado; **714 tests, 0 skips** — LA OLA 1 DEL CENTRO DE CONTROL ESTÁ COMPLETA) ·
-Siguiente: A4 conversaciones → A5 loop Claude → A6 extractores → A7 cron E1; luego B5
-registrar_factura → B6–B8; C3 olas 2–3; D deploy.
+· ✅ A4 conversaciones (spec `agente-conversacional.md` + migración
+011 phone UNIQUE; upsert en la tx del handler —incluye conversación anónima para E11—,
+historial derivado, ventana 24h chequeada en la tx del claim del dispatcher; plantillas
+nunca consultan ventana) · ✅ A7 cron E1 (helper compartido de transición+comparativo con
+orden de audit byte-idéntico, `procesarVencimientos` como actor sistema,
+`crearCtxSistema`, loop con `pg_try_advisory_xact_lock('cron:e1')`; 737 tests estables en
+doble pasada) · ✅ A5 loop Claude COMPLETO (registry único de tools —fin
+del triple whitelist—, `ModeloConversacional` + loop 5 pasos con audit `agente_max_pasos`,
+adapter `@anthropic-ai/sdk` con `AGENT_MODEL` default claude-sonnet-5, goldens contra fake
+scripted con el prompt real, engine conversacional en worker con historial A4, gating: con
+`ANTHROPIC_API_KEY` el seam `tool_call`-en-texto se apaga; 755 tests. **Prompt borrador en
+`agent/prompt.ts` — REVISIÓN HUMANA PENDIENTE antes del piloto**) · ✅ A6 extractores + camino del
+proveedor COMPLETO (media pipeline Meta→attachment_blobs con audits de fallo suave, actor
+sistema en registrar_cotizacion —solo vía proveedor—, extractores texto/Vision/Whisper con
+tool forzada y AGENT_EXTRACT_MODEL default haiku, BAJA interceptada, resolución de RFQ
+0/1/N con match de PED-nnn; integración real proveedor→quote_response→en_revision).
+
+**FASE 2A FUNCIONALMENTE COMPLETA** (774 tests, 0 fallos, doble pasada estable; migraciones
+001–011). Bloqueado en el humano antes del piloto: revisión del prompt (`agent/prompt.ts`),
+sometimiento de plantillas a Meta, credenciales reales (Meta/Anthropic/Azure) y commit del
+working tree. Siguiente por plan: B5 registrar_factura → B6–B8 (recepción/NC/cierre); C3
+olas 2–3 (dashboards por proyecto + control del agente); B9–B11; D deploy/cutover.
 
 ---
 

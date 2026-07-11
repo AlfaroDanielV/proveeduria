@@ -8,6 +8,7 @@ import {
   puedeUsarTool,
 } from '@proveeduria/core';
 import type { FuenteExtraccion } from '@proveeduria/core';
+import { esActorSistema } from '../runtime/context-sistema.js';
 import type {
   Ctx,
   ErrorTool,
@@ -494,7 +495,13 @@ function toQuoteItemInput(item: RegistrarCotizacionItemInput): QuoteItemInput {
   };
 }
 
-async function notificarAdmins(
+/**
+ * Encola una `notificacion_interna` de outbox para cada admin de materiales activo
+ * (`variables: [nombreAdmin, resumen]`, `pedido_id` en payload). Punto unico de las
+ * notificaciones internas de pedido; reutilizado por el cron E1 (`procesar_vencimientos`)
+ * para avisar de plazos vencidos con el MISMO formato de payload.
+ */
+export async function notificarAdmins(
   ctx: Ctx,
   pedidoId: string,
   resumen: string,
@@ -686,6 +693,45 @@ async function generarComparativoParaPedido(
     portalPath,
     notificaciones,
   });
+}
+
+/**
+ * Transiciona `cotizando -> en_revision` y genera el comparativo (con su notificacion
+ * interna) en la MISMA transaccion, con semantica de rollback: si el comparativo no se puede
+ * generar, LANZA para que la tx completa se revierta (nunca deja el pedido en `en_revision`
+ * sin comparativo). Punto unico compartido por `registrar_cotizacion` (cuando entra la ultima
+ * cotizacion completa) y por el cron E1 `procesar_vencimientos` — ambos DEBEN producir
+ * exactamente el mismo efecto (state-machine.md; spec agente-conversacional.md §A7).
+ *
+ * `entreTransicionYComparativo` (opcional) corre DESPUES de `marcarEnRevision` y ANTES de
+ * generar el comparativo: `registrar_cotizacion` lo usa para intercalar ahi su propio
+ * `audit_event('registrar_cotizacion')`, preservando el orden de audit_events previo a esta
+ * extraccion. El cron E1 no lo usa.
+ */
+export async function transicionarAEnRevisionConComparativo(
+  ctx: Ctx,
+  pedido: Pedido,
+  entreTransicionYComparativo?: (pedidoEnRevision: Pedido) => Promise<void>,
+): Promise<{ readonly pedido: Pedido; readonly comparativo: ResumenComparativoGenerado }> {
+  const transicion = puedeTransicionar(pedido.estado, 'en_revision');
+  if (!transicion.ok) {
+    // Rollback por throw. Inalcanzable desde registrar_cotizacion (el pedido ya se valido
+    // 'cotizando'); en el cron E1 protege contra una carrera que ya movio el estado.
+    throw new Error(
+      `No se pudo transicionar el pedido ${pedido.numero} a en_revision: ${transicion.error.mensaje}`,
+    );
+  }
+  const pedidoEnRevision = await ctx.repos.pedidos.marcarEnRevision(pedido.id);
+  if (entreTransicionYComparativo !== undefined) {
+    await entreTransicionYComparativo(pedidoEnRevision);
+  }
+  const comparativoResult = await generarComparativoParaPedido(pedidoEnRevision, ctx);
+  if (!comparativoResult.ok) {
+    throw new Error(
+      `No se pudo generar comparativo para ${pedido.numero}: ${comparativoResult.error.mensaje}`,
+    );
+  }
+  return { pedido: pedidoEnRevision, comparativo: comparativoResult.value };
 }
 
 export async function crearPedido(
@@ -903,7 +949,13 @@ export async function registrarCotizacion(
   input: unknown,
   ctx: Ctx,
 ): Promise<ResultadoTool<ResumenCotizacionRegistrada>> {
-  if (!puedeUsarTool('registrar_cotizacion', ctx.actor.roles)) return err(errorRol);
+  // tools.md §registrar_cotizacion "Actor" (agente-conversacional.md §A6): el mensaje de
+  // proveedor corre como ACTOR SISTEMA (sin roles, `quote_request_id` resuelto por remitente)
+  // y esa es la UNICA via por la que se acepta un actor sin rol interno. Para actores CON
+  // roles se mantiene la validacion normal (el reenvio manual de Proveeduria).
+  if (!esActorSistema(ctx.actor) && !puedeUsarTool('registrar_cotizacion', ctx.actor.roles)) {
+    return err(errorRol);
+  }
 
   const parsed = parseRegistrarCotizacionInput(input);
   if (!parsed.ok) return parsed;
@@ -979,6 +1031,30 @@ export async function registrarCotizacion(
   let reviewQueueId: string | null = null;
   let comparativo: ResumenComparativoGenerado | null = null;
 
+  // El audit_event `registrar_cotizacion` se emite exactamente una vez. Se define como
+  // closure para poder intercalarlo entre `marcarEnRevision` y la generacion del comparativo
+  // (via `transicionarAEnRevisionConComparativo`) sin alterar el orden de efectos ni el
+  // contenido de la auditoria respecto del comportamiento previo a extraer ese helper.
+  const auditarRegistroCotizacion = async (pedidoParaAudit: Pedido): Promise<void> => {
+    await ctx.audit({
+      accion: 'registrar_cotizacion',
+      entidad: 'quote_response',
+      entidadId: quoteResponse.id,
+      pedidoId: pedido.id,
+      antes: {
+        pedido,
+        quote_request: quoteRequest,
+      },
+      despues: {
+        pedido: pedidoParaAudit,
+        quote_request: quoteRequestFinal,
+        quote_response: quoteResponse,
+        quote_items: quoteItems,
+        review_queue_id: reviewQueueId,
+      },
+    });
+  };
+
   if (esIncompleta) {
     if (escala) {
       const review = await ctx.repos.reviewQueue.crear({
@@ -1024,41 +1100,25 @@ export async function registrarCotizacion(
         );
       }
     }
+    await auditarRegistroCotizacion(pedidoFinal);
   } else {
     quoteRequestFinal = await ctx.repos.quoteRequests.marcarRespondida(quoteRequest.id);
     const pendientes = await ctx.repos.quoteRequests.contarPendientesPorPedido(pedido.id);
     if (pendientes === 0) {
-      const transicion = puedeTransicionar(pedido.estado, 'en_revision');
-      if (!transicion.ok) return err(transicion.error);
-      pedidoFinal = await ctx.repos.pedidos.marcarEnRevision(pedido.id);
+      // Ultima cotizacion completa: misma transicion + comparativo (con throw-to-rollback)
+      // que ejecuta el cron E1. `auditarRegistroCotizacion` se intercala entre la transicion
+      // y el comparativo para conservar el orden previo de los audit_events.
+      const resultado = await transicionarAEnRevisionConComparativo(
+        ctx,
+        pedido,
+        auditarRegistroCotizacion,
+      );
+      pedidoFinal = resultado.pedido;
+      comparativo = resultado.comparativo;
       transicionoAEnRevision = true;
+    } else {
+      await auditarRegistroCotizacion(pedidoFinal);
     }
-  }
-
-  await ctx.audit({
-    accion: 'registrar_cotizacion',
-    entidad: 'quote_response',
-    entidadId: quoteResponse.id,
-    pedidoId: pedido.id,
-    antes: {
-      pedido,
-      quote_request: quoteRequest,
-    },
-    despues: {
-      pedido: pedidoFinal,
-      quote_request: quoteRequestFinal,
-      quote_response: quoteResponse,
-      quote_items: quoteItems,
-      review_queue_id: reviewQueueId,
-    },
-  });
-
-  if (transicionoAEnRevision) {
-    const comparativoResult = await generarComparativoParaPedido(pedidoFinal, ctx);
-    if (!comparativoResult.ok) {
-      throw new Error(`No se pudo generar comparativo para ${pedido.numero}: ${comparativoResult.error.mensaje}`);
-    }
-    comparativo = comparativoResult.value;
   }
 
   if (esIncompleta) {

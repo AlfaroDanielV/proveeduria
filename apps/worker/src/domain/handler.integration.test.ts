@@ -60,6 +60,34 @@ describeIntegration('worker domain handler con Postgres real', () => {
       [wamid],
     );
     expect(check.rows[0]?.processedAt).toBeInstanceOf(Date);
+
+    // A4 (docs/specs/agente-conversacional.md): upsert de conversacion en la MISMA tx,
+    // vinculada al usuario interno resuelto, con conversation_id fijado en el inbound.
+    // La ventana se compara contra el `ahora` FIJO del handler (no `now()` de Postgres: el
+    // reloj real puede estar mas adelante que la fecha fija usada en el test).
+    const conversacion = await pool.query<{
+      phone: string;
+      userId: string | null;
+      supplierContactId: string | null;
+      ventanaFutura: boolean;
+      conversationIdCoincide: boolean;
+    }>(
+      'SELECT c.phone, c.user_id AS "userId", c.supplier_contact_id AS "supplierContactId", ' +
+        "(c.ventana_24h_expira_at > '2026-07-08T12:00:00.000Z'::timestamptz) AS \"ventanaFutura\", " +
+        '(im.conversation_id = c.id) AS "conversationIdCoincide" ' +
+        'FROM inbound_messages im ' +
+        'JOIN conversations c ON c.id = im.conversation_id ' +
+        'WHERE im.wamid = $1',
+      [wamid],
+    );
+    expect(conversacion.rows).toHaveLength(1);
+    expect(conversacion.rows[0]).toMatchObject({
+      phone: '+50688880002',
+      userId: '20000000-0000-4000-8000-000000000002',
+      supplierContactId: null,
+      ventanaFutura: true,
+      conversationIdCoincide: true,
+    });
   });
 
   it('aplica E11 para remitente desconocido con audit y outbox', async () => {
@@ -107,5 +135,33 @@ describeIntegration('worker domain handler con Postgres real', () => {
     expect(check.rows[0]?.processedAt).toBeInstanceOf(Date);
     expect(Number(check.rows[0]?.outboxCount)).toBe(1);
     expect(Number(check.rows[0]?.auditCount)).toBe(1);
+
+    // A4 + decision documentada en handler.ts: el desconocido TAMBIEN obtiene una
+    // conversacion (anonima, sin user_id/supplier_contact_id) para que la respuesta libre
+    // de E11 no choque con la ventana 24h del dispatcher (outbox/dispatcher.ts). Igual que
+    // arriba, la ventana se compara contra el `ahora` fijo del handler, no `now()`.
+    const conversacion = await pool.query<{
+      phone: string;
+      userId: string | null;
+      supplierContactId: string | null;
+      ventanaFutura: boolean;
+      conversationIdCoincide: boolean;
+    }>(
+      'SELECT c.phone, c.user_id AS "userId", c.supplier_contact_id AS "supplierContactId", ' +
+        "(c.ventana_24h_expira_at > '2026-07-08T12:00:00.000Z'::timestamptz) AS \"ventanaFutura\", " +
+        '(im.conversation_id = c.id) AS "conversationIdCoincide" ' +
+        'FROM inbound_messages im ' +
+        'JOIN conversations c ON c.id = im.conversation_id ' +
+        'WHERE im.wamid = $1',
+      [wamid],
+    );
+    expect(conversacion.rows).toHaveLength(1);
+    expect(conversacion.rows[0]).toMatchObject({
+      phone: '+50689999999',
+      userId: null,
+      supplierContactId: null,
+      ventanaFutura: true,
+      conversationIdCoincide: true,
+    });
   });
 });

@@ -18,9 +18,14 @@
  *   - WORKER_OUTBOX_MODE=meta (solo con DB)    -> loop de dispatcher con `MetaOutboxSender`
  *                                                 (envio real; requiere META_PHONE_NUMBER_ID
  *                                                 y META_ACCESS_TOKEN, ver config.ts).
- *
- * TODO(Fase 2 A5): loop Claude model-backed y extractores. Ver apps/worker/CLAUDE.md y
- * docs/PLAN_FASE2A_2B_CONTROL_CENTER.md.
+ *   - ANTHROPIC_API_KEY (con DB)               -> engine conversacional Claude (spec §A5) +
+ *                                                 extractor de cotizaciones del camino del
+ *                                                 proveedor (spec §A6); sin key, structured-engine
+ *                                                 dev y el proveedor cae al seam de audit.
+ *   - META_ACCESS_TOKEN (con DB)               -> pipeline de media (descarga/persistencia de
+ *                                                 adjuntos, spec §A6); sin token, `media_sin_token`.
+ *   - OPENAI_API_KEY (con extractor)           -> transcripcion de audio del proveedor (Whisper);
+ *                                                 sin key, el audio se repregunta (spec §A6).
  */
 
 import { randomUUID } from 'node:crypto';
@@ -33,12 +38,15 @@ import { crearEchoHandler, consoleLogSink } from './handlers/echo.js';
 import { correrLoop } from './consumer.js';
 import type { WorkerConfig } from './config.js';
 import { cargarConfig } from './config.js';
+import { crearExtractorCotizacion, crearModeloAnthropic } from '@proveeduria/agent';
 import { crearDomainHandler, PgTransactionRunner } from './domain/handler.js';
 import { crearStructuredToolEngine } from './domain/structured-engine.js';
-import type { TransactionRunner } from './domain/types.js';
+import { crearClaudeDomainEngine } from './domain/claude-engine.js';
+import type { DomainEngine, TransactionRunner } from './domain/types.js';
 import { despacharOutbox } from './outbox/dispatcher.js';
 import type { OutboxMessagePendiente, OutboxSender } from './outbox/dispatcher.js';
 import { MetaOutboxSender } from './outbox/meta-sender.js';
+import { correrLoopCronE1 } from './cron/e1.js';
 
 export interface ArrancarDeps {
   readonly config?: WorkerConfig;
@@ -76,12 +84,28 @@ export type ModoHandler = 'echo' | 'dominio';
 export type ModoConsumer = 'memoria' | 'azure';
 /** Modo del dispatcher de outbox resuelto para el arranque. */
 export type ModoOutbox = 'off' | 'console' | 'meta';
+/**
+ * Engine de dominio resuelto (spec §A5). `claude` = loop conversacional model-backed (con
+ * `ANTHROPIC_API_KEY`); `estructurado` = seam `tool_call`-en-texto (dev, sin key). Solo se
+ * consume cuando `handler === 'dominio'`.
+ */
+export type ModoEngine = 'estructurado' | 'claude';
 
 /** Descripcion (pura, sin efectos) del arranque que `main` debe materializar. */
 export interface PlanArranque {
   readonly handler: ModoHandler;
   readonly consumer: ModoConsumer;
   readonly outbox: ModoOutbox;
+  /**
+   * Engine de dominio (spec §A5 gating): `claude` con `ANTHROPIC_API_KEY`, si no `estructurado`.
+   * Solo aplica cuando `handler === 'dominio'` (el engine necesita Postgres).
+   */
+  readonly engine: ModoEngine;
+  /**
+   * Cron E1 de vencimiento de plazos (spec §A7). Solo con `DATABASE_URL` (necesita el
+   * advisory lock y los repos de Postgres); sin DB queda apagado.
+   */
+  readonly cron: boolean;
   /** Mensajes a loguear al arrancar (degradaciones/omisiones), en orden. */
   readonly advertencias: readonly string[];
 }
@@ -100,6 +124,10 @@ export function planificarArranque(config: WorkerConfig): PlanArranque {
   const advertencias: string[] = [];
   const tieneDb = config.databaseUrl !== undefined;
   const tieneAzure = config.azureQueueConnection !== undefined;
+  // Gating del engine (spec §A5): con ANTHROPIC_API_KEY -> engine conversacional Claude; sin
+  // key -> structured-engine (dev). Se decide igual con o sin DB, aunque solo se consume en
+  // modo `dominio` (que ya exige DB).
+  const engine: ModoEngine = config.anthropicApiKey !== undefined ? 'claude' : 'estructurado';
 
   if (!tieneDb) {
     if (config.outboxMode === 'console' || config.outboxMode === 'meta') {
@@ -107,7 +135,10 @@ export function planificarArranque(config: WorkerConfig): PlanArranque {
         `WORKER_OUTBOX_MODE=${config.outboxMode} requiere DATABASE_URL (el dispatcher usa Postgres): outbox desactivado.`,
       );
     }
-    return { handler: 'echo', consumer: 'memoria', outbox: 'off', advertencias };
+    // El cron E1 tambien necesita Postgres (advisory lock + repos): sin DB queda apagado.
+    // No agrega advertencia propia (no hay flag separado que "pida" cron); el campo `cron`
+    // del plan comunica la decision.
+    return { handler: 'echo', consumer: 'memoria', outbox: 'off', engine, cron: false, advertencias };
   }
 
   if (!tieneAzure) {
@@ -120,6 +151,8 @@ export function planificarArranque(config: WorkerConfig): PlanArranque {
     handler: 'dominio',
     consumer: tieneAzure ? 'azure' : 'memoria',
     outbox: config.outboxMode,
+    engine,
+    cron: true,
     advertencias,
   };
 }
@@ -209,6 +242,8 @@ function main(): void {
     handler: plan.handler,
     consumer: plan.consumer,
     outbox: plan.outbox,
+    engine: plan.engine,
+    cron: plan.cron,
     queueName: config.queueName,
   });
   for (const advertencia of plan.advertencias) {
@@ -221,8 +256,34 @@ function main(): void {
     : null;
   const runner = pool !== null ? new PgTransactionRunner(pool) : null;
 
+  // Gating del engine (spec §A5): con ANTHROPIC_API_KEY se monta el loop conversacional Claude
+  // (y, spec §A6, el extractor de cotizaciones del camino del proveedor); el seam estructurado
+  // (tool_call-en-texto) queda apagado. Sin key, el structured-engine dev (y el proveedor cae al
+  // seam de audit).
+  const engine: DomainEngine = plan.engine === 'claude' && config.anthropicApiKey !== undefined
+    ? crearClaudeDomainEngine({
+        modelo: crearModeloAnthropic({ apiKey: config.anthropicApiKey, model: config.agentModel }),
+        extractor: crearExtractorCotizacion({
+          apiKey: config.anthropicApiKey,
+          model: config.agentExtractModel,
+          ...(config.openaiApiKey !== undefined ? { openaiApiKey: config.openaiApiKey } : {}),
+        }),
+      })
+    : crearStructuredToolEngine();
+
+  // Pipeline de media (spec §A6): se cablea siempre que corre el handler de dominio; solo
+  // necesita el META_ACCESS_TOKEN (independiente del modo de outbox). Sin token, cada media
+  // audita `media_sin_token` y el mensaje sigue sin adjunto (ver media.ts / config.ts).
   const handler: JobHandler = plan.handler === 'dominio' && runner !== null
-    ? crearDomainHandler({ runner, engine: crearStructuredToolEngine(), log })
+    ? crearDomainHandler({
+        runner,
+        engine,
+        log,
+        media: {
+          graphUrl: config.metaGraphUrl,
+          ...(config.metaAccessToken !== undefined ? { accessToken: config.metaAccessToken } : {}),
+        },
+      })
     : crearEchoHandler(log);
 
   const consumer: QueueConsumer = plan.consumer === 'azure'
@@ -259,6 +320,17 @@ function main(): void {
         log,
         claimLeaseMs: config.claimLeaseSegundos * 1000,
         limit: config.outboxBatch,
+      }),
+    );
+  }
+
+  if (plan.cron && runner !== null) {
+    loops.push(
+      correrLoopCronE1({
+        runner,
+        intervaloMs: config.cronPollMs,
+        signal: abort.signal,
+        log,
       }),
     );
   }

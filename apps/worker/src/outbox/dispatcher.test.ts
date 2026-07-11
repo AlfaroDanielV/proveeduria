@@ -32,6 +32,9 @@ class FakeStore implements OutboxStore {
   descartados: { id: string; error: string }[] = [];
   liberados: string[][] = [];
   reclamos: ReclamarInput[] = [];
+  consultasVentana: { destino: string; ahora: Date }[] = [];
+  /** Destinos SIN ventana vigente para esta corrida (default: todos vigentes). */
+  ventanaCerradaPara = new Set<string>();
 
   constructor(private readonly messages: readonly OutboxMessagePendiente[]) {}
 
@@ -54,6 +57,11 @@ class FakeStore implements OutboxStore {
 
   async liberar(ids: readonly string[]): Promise<void> {
     this.liberados.push([...ids]);
+  }
+
+  async ventanaVigentePorDestino(destino: string, ahora: Date): Promise<boolean> {
+    this.consultasVentana.push({ destino, ahora });
+    return !this.ventanaCerradaPara.has(destino);
   }
 }
 
@@ -164,6 +172,65 @@ describe('despacharOutbox', () => {
     // m2 y m3 nunca se intentaron: liberados de vuelta a pendiente.
     expect(store.liberados).toEqual([['m2', 'm3']]);
     expect(store.enviados).toEqual([]);
+  });
+
+  it('ventana 24h: descarta sesion libre sin ventana vigente sin llamar al sender', async () => {
+    const store = new FakeStore([
+      message('m1', { destino: '+50688881001', template: null, texto: 'hola' }),
+    ]);
+    store.ventanaCerradaPara.add('+50688881001');
+    const sender = new FakeSender();
+
+    const result = await despachar(store, sender);
+
+    expect(result).toEqual({ tomados: 1, enviados: 0, fallidos: 0, descartados: 1 });
+    expect(store.descartados).toEqual([{ id: 'm1', error: 'ventana_24h_cerrada' }]);
+    expect(store.enviados).toEqual([]);
+    expect(store.fallidos).toEqual([]);
+    // La consulta de ventana ocurre ANTES de intentar el envio (nunca llega al sender).
+    expect(store.consultasVentana).toEqual([{ destino: '+50688881001', ahora: AHORA }]);
+  });
+
+  it('ventana 24h: envia sesion libre cuando la ventana esta vigente', async () => {
+    const store = new FakeStore([
+      message('m1', { destino: '+50688881001', template: null, texto: 'hola' }),
+    ]);
+    const sender = new FakeSender();
+
+    const result = await despachar(store, sender);
+
+    expect(result).toEqual({ tomados: 1, enviados: 1, fallidos: 0, descartados: 0 });
+    expect(store.enviados).toEqual([{ id: 'm1', wamidSalida: 'wamid.out.m1' }]);
+    expect(store.consultasVentana).toEqual([{ destino: '+50688881001', ahora: AHORA }]);
+  });
+
+  it('ventana 24h: las plantillas se envian siempre, sin consultar la ventana', async () => {
+    const store = new FakeStore([
+      message('m1', { destino: '+50688881001', template: 'rfq_solicitud', texto: null }),
+    ]);
+    store.ventanaCerradaPara.add('+50688881001');
+    const sender = new FakeSender();
+
+    const result = await despachar(store, sender);
+
+    expect(result).toEqual({ tomados: 1, enviados: 1, fallidos: 0, descartados: 0 });
+    expect(store.enviados).toEqual([{ id: 'm1', wamidSalida: 'wamid.out.m1' }]);
+    expect(store.consultasVentana).toEqual([]);
+  });
+
+  it('ventana 24h: en un batch mixto, solo la fila de sesion libre sin ventana se descarta', async () => {
+    const store = new FakeStore([
+      message('m1', { destino: '+50688880002', template: null, texto: 'repregunta' }),
+      message('m2', { destino: '+50688881001', template: 'notificacion_interna', texto: null }),
+    ]);
+    store.ventanaCerradaPara.add('+50688880002');
+    const sender = new FakeSender();
+
+    const result = await despachar(store, sender);
+
+    expect(result).toEqual({ tomados: 2, enviados: 1, fallidos: 0, descartados: 1 });
+    expect(store.descartados).toEqual([{ id: 'm1', error: 'ventana_24h_cerrada' }]);
+    expect(store.enviados).toEqual([{ id: 'm2', wamidSalida: 'wamid.out.m2' }]);
   });
 });
 

@@ -1,14 +1,12 @@
 import type { Ctx, ErrorTool, ResultadoTool } from '../runtime/types.js';
+import { TOOLS_REGISTRY } from './registry.js';
 
-export type ToolFase2a =
-  | 'crear_pedido'
-  | 'confirmar_pedido'
-  | 'sugerir_proveedores'
-  | 'enviar_rfq'
-  | 'registrar_cotizacion'
-  | 'generar_comparativo'
-  | 'aprobar_ganador'
-  | 'emitir_oc';
+/**
+ * Nombres de las tools conversacionales, DERIVADOS del registro unico (`registry.ts`). Antes
+ * era una union hardcodeada duplicada en `structured.ts` y `tool-dispatcher.ts`; ahora la
+ * fuente unica es `TOOLS_REGISTRY` (agente-conversacional.md §A5, "fin del triple mantenimiento").
+ */
+export type ToolFase2a = (typeof TOOLS_REGISTRY)[number]['name'];
 
 export interface ToolCallEstructurado {
   readonly name: ToolFase2a;

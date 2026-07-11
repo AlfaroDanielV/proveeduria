@@ -14,9 +14,24 @@
  * `rate_limit` -> fallido con max(Retry-After, backoff) y el resto del batch se libera
  * (revirtiendo el intento del claim); `transitorio` (y todo throw no tipado) -> fallido
  * con backoff exponencial, o descartado si agoto `max_intentos`.
+ *
+ * Ventana 24h (docs/specs/agente-conversacional.md §A4, reemplaza el fallback pasivo por
+ * error 131047 de Meta): antes de aceptar para envio una fila de SESION LIBRE
+ * (`texto != null && template === null`), se consulta si `destino` tiene una conversacion
+ * con `ventana_24h_expira_at > ahora`; si no, se descarta de inmediato
+ * (`error_ultimo = 'ventana_24h_cerrada'`, mismo camino de `marcarDescartado` que un error
+ * permanente, cuenta en `descartados`). Las plantillas (`template != null`) se envian
+ * siempre, sin consultar la ventana. Decision de costura: `OutboxStore` gana
+ * `ventanaVigentePorDestino`, respaldado en `PgOutboxStore` por
+ * `ConversacionRepo.ventanaVigente` de `@proveeduria/agent` (misma `Tx` que el claim, por lo
+ * que la lectura ocurre en la MISMA transaccion que reclama el batch) en vez de un
+ * `VentanaStore` inyectado aparte en `despacharOutbox`: evita una dependencia nueva en la
+ * firma de `despacharOutbox` y reusa una sola fuente de verdad (la tabla `conversations`)
+ * para esta lectura, igual que la usa el handler de dominio (A4) al hacer el upsert.
  */
 
-import type { Tx } from '@proveeduria/agent';
+import { PgConversacionRepo } from '@proveeduria/agent';
+import type { ConversacionRepo, Tx } from '@proveeduria/agent';
 import type { TransactionRunner } from '../domain/types.js';
 
 export interface OutboxMessagePendiente {
@@ -86,6 +101,12 @@ export interface OutboxStore {
   ): Promise<void>;
   /** Devuelve filas reclamadas no intentadas a `pendiente`, revirtiendo el intento del claim. */
   liberar(ids: readonly string[]): Promise<void>;
+  /**
+   * Ventana 24h activa (agente-conversacional.md §A4) del `destino`: `true` si existe una
+   * conversacion con `ventana_24h_expira_at > ahora`. Solo se consulta para filas de sesion
+   * libre (`texto != null && template === null`); las plantillas nunca la consultan.
+   */
+  ventanaVigentePorDestino(destino: string, ahora: Date): Promise<boolean>;
 }
 
 interface OutboxRow {
@@ -120,7 +141,11 @@ function pedidoIdDePayload(payload: unknown): string | null {
 }
 
 export class PgOutboxStore implements OutboxStore {
-  constructor(private readonly tx: Tx) {}
+  private readonly conversaciones: ConversacionRepo;
+
+  constructor(private readonly tx: Tx) {
+    this.conversaciones = new PgConversacionRepo(tx);
+  }
 
   async reclamar(input: ReclamarInput): Promise<readonly OutboxMessagePendiente[]> {
     const result = await this.tx.query<OutboxRow>(
@@ -196,6 +221,10 @@ export class PgOutboxStore implements OutboxStore {
       [ids],
     );
   }
+
+  async ventanaVigentePorDestino(destino: string, ahora: Date): Promise<boolean> {
+    return this.conversaciones.ventanaVigente(destino, ahora);
+  }
 }
 
 export interface DespacharOutboxDeps {
@@ -222,6 +251,14 @@ function backoffMs(intentos: number, retryBaseMs: number, retryMaxMs: number): n
   return Math.min(retryBaseMs * 2 ** Math.max(0, intentos - 1), retryMaxMs);
 }
 
+/** Error terminal (agente-conversacional.md §A4) cuando la ventana 24h del destino cerro. */
+const ERROR_VENTANA_24H_CERRADA = 'ventana_24h_cerrada';
+
+/** Sesion libre = candidata a la prevencion activa de ventana 24h (spec §A4). */
+function esSesionLibre(mensaje: OutboxMessagePendiente): boolean {
+  return mensaje.texto !== null && mensaje.template === null;
+}
+
 export async function despacharOutbox(
   deps: DespacharOutboxDeps,
 ): Promise<ResultadoDespachoOutbox> {
@@ -232,18 +269,35 @@ export async function despacharOutbox(
   const claimLeaseMs = deps.claimLeaseMs ?? 300_000;
   const store = (tx: Tx): OutboxStore => deps.store?.(tx) ?? new PgOutboxStore(tx);
 
-  // 1) Claim en tx corta propia.
-  const mensajes = await deps.runner.run((tx) =>
-    store(tx).reclamar({
+  // 1) Claim en tx corta propia. En la MISMA tx (misma lectura indexada, spec §A4) se
+  // descartan de inmediato las filas de sesion libre cuya ventana 24h ya cerro: nunca
+  // llegan al sender ni al batch devuelto.
+  const claim = await deps.runner.run(async (tx) => {
+    const s = store(tx);
+    const reclamados = await s.reclamar({
       ahora: now,
       leaseVencidoAntesDe: new Date(now.getTime() - claimLeaseMs),
       limit,
-    }),
-  );
+    });
 
+    const aceptados: OutboxMessagePendiente[] = [];
+    let descartadosPorVentana = 0;
+    for (const mensaje of reclamados) {
+      if (esSesionLibre(mensaje) && !(await s.ventanaVigentePorDestino(mensaje.destino, now))) {
+        await s.marcarDescartado(mensaje, ERROR_VENTANA_24H_CERRADA, now);
+        descartadosPorVentana += 1;
+        continue;
+      }
+      aceptados.push(mensaje);
+    }
+
+    return { tomados: reclamados.length, aceptados, descartadosPorVentana };
+  });
+
+  const mensajes = claim.aceptados;
   let enviados = 0;
   let fallidos = 0;
-  let descartados = 0;
+  let descartados = claim.descartadosPorVentana;
 
   for (let i = 0; i < mensajes.length; i += 1) {
     const mensaje = mensajes[i] as OutboxMessagePendiente;
@@ -299,5 +353,5 @@ export async function despacharOutbox(
     enviados += 1;
   }
 
-  return { tomados: mensajes.length, enviados, fallidos, descartados };
+  return { tomados: claim.tomados, enviados, fallidos, descartados };
 }

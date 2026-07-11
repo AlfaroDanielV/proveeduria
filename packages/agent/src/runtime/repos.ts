@@ -21,6 +21,8 @@ import type {
   ComparativoRepo,
   ConfigRepo,
   CoberturaRepo,
+  ConversacionRepo,
+  ConversacionUpsertResultado,
   CreditNote,
   CreditNoteRepo,
   DashboardLink,
@@ -41,6 +43,8 @@ import type {
   InvoicePoLinkRepo,
   InvoiceRepo,
   ItemPedidoInput,
+  MensajeHistorial,
+  NuevaConversacionInput,
   NuevaCreditNote,
   NuevaInvoice,
   NuevaOc,
@@ -69,6 +73,7 @@ import type {
   QuoteItemInput,
   QuoteRequest,
   QuoteRequestRepo,
+  RfqActivaProveedor,
   QuoteResponse,
   QuoteResponseRepo,
   ReceiptConfirmation,
@@ -136,6 +141,13 @@ interface QuoteRequestRow {
   readonly supplierId: string;
   readonly plazoAt: Date | string;
   readonly estado: QuoteRequest['estado'];
+}
+
+interface RfqActivaProveedorRow {
+  readonly quoteRequestId: string;
+  readonly pedidoId: string;
+  readonly pedidoNumero: string;
+  readonly supplierId: string;
 }
 
 interface QuoteResponseRow {
@@ -708,6 +720,30 @@ export class PgQuoteRequestRepo implements QuoteRequestRepo {
       [ahora],
     );
     return result.rows.map(mapQuoteRequest);
+  }
+
+  async rfqsActivasPorContacto(
+    supplierContactId: string,
+  ): Promise<readonly RfqActivaProveedor[]> {
+    // enviado_at queda null hasta `marcarRespondida`; para las 'enviada' ordenamos por
+    // created_at (mas reciente primero), con enviado_at como desempate defensivo.
+    const result = await this.tx.query<RfqActivaProveedorRow>(
+      'SELECT qr.id AS "quoteRequestId", qr.pedido_id AS "pedidoId", ' +
+        'p.numero AS "pedidoNumero", qr.supplier_id AS "supplierId" ' +
+        'FROM supplier_contacts sc ' +
+        'JOIN quote_requests qr ON qr.supplier_id = sc.supplier_id ' +
+        "  AND qr.estado = 'enviada' " +
+        'JOIN pedidos p ON p.id = qr.pedido_id ' +
+        'WHERE sc.id = $1 ' +
+        'ORDER BY qr.enviado_at DESC NULLS LAST, qr.created_at DESC, qr.id',
+      [supplierContactId],
+    );
+    return result.rows.map((row) => ({
+      quoteRequestId: row.quoteRequestId,
+      pedidoId: row.pedidoId,
+      pedidoNumero: row.pedidoNumero,
+      supplierId: row.supplierId,
+    }));
   }
 }
 
@@ -1860,6 +1896,114 @@ export class PgApprovalRepo implements ApprovalRepo {
   }
 }
 
+// ---------------------------------------------------------------------------
+// conversations (docs/specs/agente-conversacional.md §A4). Ver contrato en types.ts.
+// ---------------------------------------------------------------------------
+
+/** 24h en ms (agente-conversacional.md §A4: `ventana_24h_expira_at = recibidoAt + 24h`). */
+const VENTANA_24H_MS = 24 * 60 * 60 * 1000;
+
+interface ConversacionRow {
+  readonly id: string;
+}
+
+interface HistorialRow {
+  readonly direccion: MensajeHistorial['direccion'];
+  readonly texto: string;
+  readonly at: Date | string;
+}
+
+function mapHistorial(row: HistorialRow): MensajeHistorial {
+  return { direccion: row.direccion, texto: row.texto, at: dateFromRow(row.at) };
+}
+
+/**
+ * Variantes con/sin '+' de un telefono. Meta persiste `inbound_messages.from_phone` en
+ * E.164 SIN '+' (apps/api/src/webhook/parse.ts), mientras que `users`/`supplier_contacts`
+ * (y por tanto `conversations.phone` y casi todo `outbox_messages.destino`) se siembran
+ * CON '+'. Mismo patron que `apps/worker/src/domain/router.ts` `phoneCandidates`
+ * (duplicado a proposito: `packages/agent` no depende de `apps/worker`).
+ */
+function candidatosTelefono(phone: string): readonly string[] {
+  const trimmed = phone.trim();
+  if (trimmed === '') return [trimmed];
+  return trimmed.startsWith('+') ? [trimmed, trimmed.slice(1)] : [trimmed, `+${trimmed}`];
+}
+
+export class PgConversacionRepo implements ConversacionRepo {
+  constructor(private readonly tx: Tx) {}
+
+  async upsertPorTelefono(input: NuevaConversacionInput): Promise<ConversacionUpsertResultado> {
+    const expiraAt = new Date(input.recibidoAt.getTime() + VENTANA_24H_MS);
+    const result = await this.tx.query<ConversacionRow>(
+      'INSERT INTO conversations ' +
+        '(phone, user_id, supplier_contact_id, last_message_at, ventana_24h_expira_at) ' +
+        'VALUES ($1, $2, $3, $4, $5) ' +
+        'ON CONFLICT (phone) DO UPDATE SET ' +
+        'last_message_at = EXCLUDED.last_message_at, ' +
+        'ventana_24h_expira_at = EXCLUDED.ventana_24h_expira_at, ' +
+        'user_id = COALESCE(EXCLUDED.user_id, conversations.user_id), ' +
+        'supplier_contact_id = COALESCE(EXCLUDED.supplier_contact_id, conversations.supplier_contact_id) ' +
+        'RETURNING id',
+      [
+        input.phone,
+        input.userId ?? null,
+        input.supplierContactId ?? null,
+        input.recibidoAt,
+        expiraAt,
+      ],
+    );
+    const row = result.rows[0];
+    if (row === undefined) throw new Error('No se pudo hacer upsert de la conversacion.');
+    return { id: row.id };
+  }
+
+  async ventanaVigente(phone: string, ahora: Date): Promise<boolean> {
+    const result = await this.tx.query<{ existe: boolean }>(
+      'SELECT EXISTS (' +
+        'SELECT 1 FROM conversations ' +
+        'WHERE phone = ANY($1::text[]) AND ventana_24h_expira_at > $2' +
+        ') AS existe',
+      [candidatosTelefono(phone), ahora],
+    );
+    return result.rows[0]?.existe ?? false;
+  }
+
+  async historialPorTelefono(
+    phone: string,
+    limite = 20,
+  ): Promise<readonly MensajeHistorial[]> {
+    const result = await this.tx.query<HistorialRow>(
+      'SELECT direccion, texto, at FROM (' +
+        'SELECT direccion, texto, at FROM (' +
+        "SELECT 'entrante' AS direccion, " +
+        'CASE im.tipo ' +
+        "WHEN 'texto' THEN COALESCE(im.payload->'text'->>'body', '') " +
+        "WHEN 'imagen' THEN '[imagen]' " +
+        "WHEN 'audio' THEN '[audio]' " +
+        "WHEN 'documento' THEN '[documento]' " +
+        "ELSE '[' || im.tipo || ']' " +
+        'END AS texto, ' +
+        'im.received_at AS at ' +
+        'FROM inbound_messages im ' +
+        'WHERE im.from_phone = ANY($1::text[]) ' +
+        'UNION ALL ' +
+        "SELECT 'saliente' AS direccion, " +
+        "COALESCE(om.texto, '[plantilla ' || COALESCE(om.template, '?') || ']') AS texto, " +
+        'om.created_at AS at ' +
+        'FROM outbox_messages om ' +
+        "WHERE om.destino = ANY($1::text[]) AND om.estado IN ('enviado', 'enviando', 'pendiente') " +
+        ') historial ' +
+        'ORDER BY at DESC ' +
+        'LIMIT $2' +
+        ') recientes ' +
+        'ORDER BY at ASC',
+      [candidatosTelefono(phone), limite],
+    );
+    return result.rows.map(mapHistorial);
+  }
+}
+
 export function crearReposPg(tx: Tx): Repos {
   return {
     proyectos: new PgProyectoRepo(tx),
@@ -1883,5 +2027,6 @@ export function crearReposPg(tx: Tx): Repos {
     cobertura: new PgCoberturaRepo(tx),
     attachments: new PgAttachmentRepo(tx),
     approvals: new PgApprovalRepo(tx),
+    conversaciones: new PgConversacionRepo(tx),
   };
 }

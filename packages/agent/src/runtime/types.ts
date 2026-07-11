@@ -176,11 +176,32 @@ export interface NuevoQuoteRequest {
   readonly plazoAt: Date;
 }
 
+/**
+ * Una RFQ `enviada` activa de un proveedor, resuelta por remitente
+ * (agente-conversacional.md §A6 "resolucion del `quote_request_id` por remitente"). Trae el
+ * `numero` del pedido (PED-YYYY-NNN) para que el engine del proveedor lo cite en la
+ * confirmacion/repregunta y pueda desambiguar por PED cuando hay mas de una.
+ */
+export interface RfqActivaProveedor {
+  readonly quoteRequestId: string;
+  readonly pedidoId: string;
+  readonly pedidoNumero: string;
+  readonly supplierId: string;
+}
+
 export interface QuoteRequestRepo {
   crear(input: NuevoQuoteRequest): Promise<QuoteRequest>;
   bloquearPorId(quoteRequestId: string): Promise<QuoteRequest | null>;
   marcarRespondida(quoteRequestId: string): Promise<QuoteRequest>;
   contarPendientesPorPedido(pedidoId: string): Promise<number>;
+  /**
+   * RFQs `enviada` del proveedor DUE del contacto remitente (join
+   * `supplier_contacts -> suppliers -> quote_requests estado='enviada' -> pedidos`), mas
+   * reciente primero (agente-conversacional.md §A6). Devuelve TODAS: el engine decide (v1: 1
+   * -> esa; >1 -> repregunta el PED, o match directo si el texto trae PED-YYYY-NNN; 0 ->
+   * respuesta cortes de que no hay cotizacion pendiente).
+   */
+  rfqsActivasPorContacto(supplierContactId: string): Promise<readonly RfqActivaProveedor[]>;
   /**
    * E1 (exceptions.md): marca `vencida` toda `quote_request` en estado `enviada` cuyo
    * `plazoAt <= ahora`, y devuelve las afectadas (con `pedidoId`) para que el cron A7
@@ -686,6 +707,59 @@ export interface CoberturaRepo {
   estadosOcDePedido(pedidoId: string): Promise<readonly OcParaCobertura[]>;
 }
 
+// ---------------------------------------------------------------------------
+// conversations (docs/specs/agente-conversacional.md §A4): una conversacion viva por
+// telefono (`conversations.phone` UNIQUE, migracion 011), upsert en la MISMA tx del
+// handler del worker, y el historial derivado (nunca duplicado) de
+// `inbound_messages`/`outbox_messages` para alimentar el loop de agente (A5) y la ventana
+// 24h activa del dispatcher del outbox (A4).
+// ---------------------------------------------------------------------------
+
+export interface NuevaConversacionInput {
+  readonly phone: string;
+  /** `users.id` si el remitente es interno. */
+  readonly userId?: string | null;
+  /** `supplier_contacts.id` si el remitente es un contacto de proveedor. */
+  readonly supplierContactId?: string | null;
+  readonly recibidoAt: Date;
+}
+
+export interface ConversacionUpsertResultado {
+  readonly id: string;
+}
+
+export type DireccionMensajeHistorial = 'entrante' | 'saliente';
+
+export interface MensajeHistorial {
+  readonly direccion: DireccionMensajeHistorial;
+  readonly texto: string;
+  readonly at: Date;
+}
+
+export interface ConversacionRepo {
+  /**
+   * `INSERT ... ON CONFLICT (phone) DO UPDATE` (agente-conversacional.md §A4): siempre fija
+   * `last_message_at = recibidoAt` y `ventana_24h_expira_at = recibidoAt + 24h`; el vinculo
+   * `user_id`/`supplier_contact_id` se fija SOLO si esta llamada lo trae (`COALESCE` contra
+   * el valor ya persistido) — no borra un vinculo previo si esta llamada no aporta uno
+   * nuevo (p.ej. un remitente `desconocido` reintenta despues de que Proveeduria lo dio de
+   * alta y la conversacion ya tenia `user_id`).
+   */
+  upsertPorTelefono(input: NuevaConversacionInput): Promise<ConversacionUpsertResultado>;
+  /** `true` si existe una conversacion de `phone` con `ventana_24h_expira_at > ahora`. */
+  ventanaVigente(phone: string, ahora: Date): Promise<boolean>;
+  /**
+   * Historial intercalado por fecha ASCENDENTE, ultimos `limite` mensajes (default 20):
+   * entrantes de `inbound_messages` del telefono + salientes de `outbox_messages` con
+   * destino ese telefono y estado `enviado|enviando|pendiente` (agente-conversacional.md
+   * §A4 "Historial para el loop"). Derivado, nunca duplicado en tabla propia.
+   */
+  historialPorTelefono(
+    phone: string,
+    limite?: number,
+  ): Promise<readonly MensajeHistorial[]>;
+}
+
 export interface Repos {
   readonly proyectos: ProyectoRepo;
   readonly pedidos: PedidoRepo;
@@ -708,6 +782,7 @@ export interface Repos {
   readonly cobertura: CoberturaRepo;
   readonly attachments: AttachmentRepo;
   readonly approvals: ApprovalRepo;
+  readonly conversaciones: ConversacionRepo;
 }
 
 export interface AuditEvent {

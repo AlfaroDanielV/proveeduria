@@ -17,6 +17,26 @@ describe('cargarConfig', () => {
     expect(config.metaGraphUrl).toBe('https://graph.facebook.com/v23.0');
     expect(config.claimLeaseSegundos).toBe(300);
     expect(config.outboxBatch).toBe(20);
+    expect(config.cronPollMs).toBe(60000);
+    expect(config.anthropicApiKey).toBeUndefined();
+    expect(config.agentModel).toBe('claude-sonnet-5');
+  });
+
+  it('lee ANTHROPIC_API_KEY y AGENT_MODEL cuando estan presentes', () => {
+    const config = cargarConfig({ ANTHROPIC_API_KEY: 'sk-ant-xyz', AGENT_MODEL: 'claude-opus-4-8' });
+    expect(config.anthropicApiKey).toBe('sk-ant-xyz');
+    expect(config.agentModel).toBe('claude-opus-4-8');
+  });
+
+  it('AGENT_MODEL vacio cae al default y ANTHROPIC_API_KEY vacio queda undefined', () => {
+    const config = cargarConfig({ ANTHROPIC_API_KEY: '   ', AGENT_MODEL: '  ' });
+    expect(config.anthropicApiKey).toBeUndefined();
+    expect(config.agentModel).toBe('claude-sonnet-5');
+  });
+
+  it('respeta WORKER_CRON_POLL_MS y cae al default si es invalido', () => {
+    expect(cargarConfig({ WORKER_CRON_POLL_MS: '15000' }).cronPollMs).toBe(15000);
+    expect(cargarConfig({ WORKER_CRON_POLL_MS: 'abc' }).cronPollMs).toBe(60000);
   });
 
   it('activa outbox console y respeta el intervalo configurado', () => {

@@ -30,6 +30,14 @@ describeIntegration('outbox dispatcher con Postgres real', () => {
 
   it('toma pendiente, envia y marca wamid_salida', async () => {
     const destino = `+5068${randomUUID().slice(0, 8)}`;
+    // Fila de texto = sesion libre (spec §A4): necesita una conversacion con ventana 24h
+    // vigente para el `destino`, o el dispatcher la descarta antes de llegar al sender
+    // (ver test "ventana 24h" mas abajo para el caso sin conversacion).
+    await pool.query(
+      'INSERT INTO conversations (phone, last_message_at, ventana_24h_expira_at) ' +
+        "VALUES ($1, '2026-07-08T11:00:00.000Z', '2026-07-09T00:00:00.000Z')",
+      [destino],
+    );
     const insert = await pool.query<{ id: string }>(
       'INSERT INTO outbox_messages (destino, texto, payload, created_at) ' +
         "VALUES ($1, $2, $3::jsonb, '2000-01-01T00:00:00.000Z') RETURNING id",
@@ -101,5 +109,66 @@ describeIntegration('outbox dispatcher con Postgres real', () => {
     );
     expect(audit.rows).toHaveLength(1);
     expect(audit.rows[0]?.origen).toBe('system');
+  });
+
+  it('ventana 24h: fila de texto sin conversacion se descarta con ventana_24h_cerrada', async () => {
+    const destino = `+5068${randomUUID().slice(0, 8)}`;
+    // Deliberadamente SIN fila en `conversations` para este destino.
+    const insert = await pool.query<{ id: string }>(
+      'INSERT INTO outbox_messages (destino, texto, payload, created_at) ' +
+        "VALUES ($1, $2, $3::jsonb, '1998-01-01T00:00:00.000Z') RETURNING id",
+      [destino, 'repregunta sin conversacion previa', JSON.stringify({})],
+    );
+    const id = insert.rows[0]?.id;
+    if (id === undefined) throw new Error('No se pudo insertar outbox.');
+
+    const result = await despacharOutbox({
+      runner: new PgTransactionRunner(pool),
+      sender: new FakeSender(),
+      ahora: () => new Date('2026-07-08T12:00:00.000Z'),
+      limit: 1,
+    });
+
+    expect(result).toEqual({ tomados: 1, enviados: 0, fallidos: 0, descartados: 1 });
+    const fila = await pool.query<{ estado: string; errorUltimo: string | null }>(
+      'SELECT estado, error_ultimo AS "errorUltimo" FROM outbox_messages WHERE id = $1',
+      [id],
+    );
+    expect(fila.rows[0]?.estado).toBe('descartado');
+    expect(fila.rows[0]?.errorUltimo).toBe('ventana_24h_cerrada');
+
+    const audit = await pool.query<{ accion: string; origen: string }>(
+      "SELECT accion, origen FROM audit_events WHERE accion = 'outbox_descartado' " +
+        'AND entidad_id = $1',
+      [id],
+    );
+    expect(audit.rows).toHaveLength(1);
+    expect(audit.rows[0]?.origen).toBe('system');
+  });
+
+  it('ventana 24h: plantilla se envia siempre aunque no haya conversacion', async () => {
+    const destino = `+5068${randomUUID().slice(0, 8)}`;
+    // Sin fila en `conversations`: una plantilla no depende de la ventana 24h.
+    const insert = await pool.query<{ id: string }>(
+      'INSERT INTO outbox_messages (destino, template, payload, created_at) ' +
+        "VALUES ($1, $2, $3::jsonb, '1997-01-01T00:00:00.000Z') RETURNING id",
+      [destino, 'rfq_solicitud', JSON.stringify({ variables: ['x'] })],
+    );
+    const id = insert.rows[0]?.id;
+    if (id === undefined) throw new Error('No se pudo insertar outbox.');
+
+    const result = await despacharOutbox({
+      runner: new PgTransactionRunner(pool),
+      sender: new FakeSender(),
+      ahora: () => new Date('2026-07-08T12:00:00.000Z'),
+      limit: 1,
+    });
+
+    expect(result).toEqual({ tomados: 1, enviados: 1, fallidos: 0, descartados: 0 });
+    const fila = await pool.query<{ estado: string }>(
+      'SELECT estado FROM outbox_messages WHERE id = $1',
+      [id],
+    );
+    expect(fila.rows[0]?.estado).toBe('enviado');
   });
 });
