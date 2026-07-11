@@ -113,7 +113,7 @@ Reglas duras:
 - RFQ: sugerencia de proveedores, aprobación de lista, envío paralelo con plantillas aprobadas, estado `Cotizando`.
 - Captura de cotizaciones (texto/foto/audio) → normalización → tabla comparativa por WhatsApp y en portal.
 - Portal: lista de pedidos por estado, detalle de pedido, comparativo.
-- **Entregable día 30**: demo end-to-end pedido→cotizaciones→comparativo con datos reales de prueba, navegable por el equipo Proyekta.
+- **Entregable día 30**: demo end-to-end pedido→cotizaciones→comparativo con datos reales de prueba, navegable por el equipo Atemporal.
 
 ### Fase 2b — Flujo completo (días 31–60)
 - Aprobación de ganador (único o dividido), emisión y envío de OC (PDF generado + plantilla WhatsApp), estados `Aprobado`/`Ordenado`.
