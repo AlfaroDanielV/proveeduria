@@ -20,15 +20,25 @@ acompañado de tests que fallen ruidosamente.
 
 ## Mapa de modulos
 
-- `types.ts` — contrato de tipos (enums del dominio, `Result`, `UmbralesConfig`). Lo
-  escribio el humano; es el vocabulario que todo el monorepo importa. No renombrar sin
-  actualizar todos los consumidores.
-- `state-machine.ts` — tabla de transiciones + `puedeTransicionar`/`transicionar`.
+- `types.ts` — contrato de tipos (enums del dominio, `Result`, `UmbralesConfig`,
+  `CampoExtraido<T>`/`CamposFacturaExtraida`). Lo escribio el humano; es el vocabulario que
+  todo el monorepo importa. No renombrar sin actualizar todos los consumidores.
+- `state-machine.ts` — tabla de transiciones del pedido + `puedeTransicionar`/`transicionar`.
+- `oc-state-machine.ts` — tabla de transiciones de la OC + `puedeTransicionarOc`/
+  `esTerminalOc` (state-machine.md §Ciclo de la OC). No valida la guardia "anulada solo sin
+  recepciones" (depende de datos; queda para la tool).
 - `numbering.ts` — formato y siguiente correlativo `PED-YYYY-NNN` / `OC-YYYY-NNN`
   (logica pura; el `FOR UPDATE` transaccional vive en packages/db).
 - `roles.ts` — catalogo de roles y matriz tool→roles (equivale a `TOOL_ROLES`).
 - `policy.ts` — que accion/transicion exige cual `TipoAprobacion`.
-- `exceptions.ts` — deteccion determinista E1..E13 y umbrales por defecto.
+- `exceptions.ts` — deteccion determinista E1, E2, E4, E5, E9 (agregado, incluye E9
+  por-campo), E10, E12, E13 (incluye reincidencia) y umbrales por defecto.
+- `recepcion.ts` — computo de cobertura de recepcion de OC/pedido (state-machine.md
+  §Computo de cobertura, regla dura 3) y sugerencia de cierre (regla dura 4).
+- `matching.ts` — matching deterministico factura↔OC (E3): normalizacion de descripciones,
+  similitud de tokens (Jaccard), score ponderado y decision unico/E3.
+- `agent-control.ts` — predicado de pausa del agente por alcance global/telefono/pedido
+  (control-center.md §Pausa del agente).
 
 ## Convenciones de TypeScript (tsconfig.base.json es estricto)
 

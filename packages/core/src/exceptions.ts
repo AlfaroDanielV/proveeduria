@@ -15,7 +15,7 @@
  * vive en types.ts (CODIGOS_EXCEPCION).
  */
 
-import type { EstadoPedido, UmbralesConfig } from './types.js';
+import type { CamposFacturaExtraida, EstadoPedido, UmbralesConfig } from './types.js';
 import { puedeTransicionar } from './state-machine.js';
 
 // ---------------------------------------------------------------------------
@@ -40,6 +40,9 @@ export const UMBRALES_DEFAULT: UmbralesConfig = {
   // E13
   horasAtascoEnRevision: 24,
   horasAtascoAprobado: 48,
+  // E3: score minimo de `matchFacturaOc` para aceptar una OC como match unico de una factura
+  // (exceptions.md fila E3 y regla general 3: "umbral_similitud_factura_oc"). Default 0.6.
+  similitudMinFacturaOc: 0.6,
 };
 
 const MS_POR_HORA = 3_600_000;
@@ -225,4 +228,87 @@ export function pedidoAtascadoDesde(
 /** E12: `true` si la transicion `de -> a` no existe en la maquina de estados. */
 export function transicionInvalida(de: EstadoPedido, a: EstadoPedido): boolean {
   return !puedeTransicionar(de, a).ok;
+}
+
+// ---------------------------------------------------------------------------
+// E9 — Extraccion OCR de factura bajo umbral, por campo.
+// ---------------------------------------------------------------------------
+
+/** Campos criticos de `CamposFacturaExtraida`: dudosos en estos disparan E9 por si solos. */
+const CAMPOS_FACTURA_CRITICOS: readonly (keyof CamposFacturaExtraida)[] = [
+  'numeroFactura',
+  'montoTotal',
+];
+
+/** Orden canonico de campos evaluados (determinista, no depende de `Object.keys`). */
+const CAMPOS_FACTURA: readonly (keyof CamposFacturaExtraida)[] = [
+  'numeroFactura',
+  'montoTotal',
+  'fecha',
+  'proveedorNombre',
+];
+
+export interface EvaluacionExtraccionFactura {
+  /** Campos con `confianza < umbrales.confianzaMinFactura`, en el orden de `CAMPOS_FACTURA`. */
+  readonly camposDudosos: readonly (keyof CamposFacturaExtraida)[];
+  /** `true` si algun campo CRITICO (numeroFactura o montoTotal) quedo dudoso. */
+  readonly disparaE9: boolean;
+}
+
+/**
+ * E9 por campo (exceptions.md fila E9): evalua la confianza de cada campo extraido de una
+ * factura contra `umbrales.confianzaMinFactura`. Un campo es "dudoso" si su confianza esta
+ * bajo el umbral (misma frontera que `extraccionBajaConfianza`: exactamente en el umbral NO
+ * es dudoso). `disparaE9` es `true` solo si `numeroFactura` o `montoTotal` (los campos
+ * criticos) quedan dudosos: "E9 dispara si confianza < 0.85 en numero de factura o cualquier
+ * monto". `fecha`/`proveedorNombre` se reportan en `camposDudosos` (para pedir confirmacion
+ * campo-por-campo al bodeguero) pero NO disparan E9 por si solos.
+ */
+export function evaluarExtraccionFactura(
+  campos: CamposFacturaExtraida,
+  umbrales: UmbralesConfig,
+): EvaluacionExtraccionFactura {
+  const camposDudosos = CAMPOS_FACTURA.filter((campo) =>
+    extraccionBajaConfianza(campos[campo].confianza, umbrales),
+  );
+  const disparaE9 = camposDudosos.some((campo) => CAMPOS_FACTURA_CRITICOS.includes(campo));
+  return { camposDudosos, disparaE9 };
+}
+
+// ---------------------------------------------------------------------------
+// E13 — Reincidencia de recordatorios (escala tambien a superadmin).
+// ---------------------------------------------------------------------------
+
+/**
+ * E13 reincidencia (exceptions.md fila E13): `true` si el recordatorio que se va a emitir
+ * seria el 2.º o posterior desde el ultimo cambio de estado del pedido — es decir, ya hubo
+ * al menos 1 recordatorio previo. Cuando es reincidente, la notificacion escala tambien a
+ * superadmin (Gerencia), ademas de a Proveeduria.
+ */
+export function esRecordatorioReincidente(recordatoriosPreviosDesdeUltimoCambio: number): boolean {
+  return recordatoriosPreviosDesdeUltimoCambio >= 1;
+}
+
+// ---------------------------------------------------------------------------
+// Ciclo de alquiler de equipos (state-machine.md §4.4).
+// ---------------------------------------------------------------------------
+
+/**
+ * `true` si el alquiler debe cerrarse automaticamente: `cantidad_activa` llego a 0 tras una
+ * devolucion (state-machine.md §4.4: "`cerrado` | `cantidad_activa == 0` tras devoluciones
+ * (Sistema, automatico)").
+ *
+ * `cantidadActiva` negativa es un invariante imposible: la spec dice "nunca puede quedar
+ * negativa (rechazar y escalar)" y el CHECK de la base de datos lo impide antes de que este
+ * dato llegue aqui. Por convencion del paquete se lanza (bug upstream), no `Result` (que es
+ * para validaciones de flujo normal / entrada de usuario).
+ */
+export function alquilerDebeCerrarse(cantidadActiva: number): boolean {
+  if (cantidadActiva < 0) {
+    throw new RangeError(
+      `cantidadActiva no puede ser negativa (recibido: ${cantidadActiva}); invariante ` +
+        'violado (el CHECK de la base de datos deberia impedirlo antes de llegar aqui).',
+    );
+  }
+  return cantidadActiva === 0;
 }

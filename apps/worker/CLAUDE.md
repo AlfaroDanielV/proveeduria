@@ -8,8 +8,18 @@ de estados de `@proveeduria/core`, el dispatcher del `outbox` a WhatsApp, y los 
 
 ## Estado actual Fase 2a
 
-El esqueleto del consumidor sigue arrancando con `echo` por defecto, pero ya existe el
-primer handler de dominio en `src/domain/`:
+El composition root (`src/index.ts`) ya monta el runtime real segun la config
+(`planificarArranque`, funcion pura testeable): sin `DATABASE_URL` queda el stub dev
+(echo + InMemory); con `DATABASE_URL` monta el domain handler real, y con
+`AZURE_STORAGE_QUEUE_CONNECTION` el consumidor durable de Azure Storage Queues
+(`src/queue/azure.ts`: visibility timeout, `dequeueCount`→`intento`, cola de veneno
+`<nombre>-poison`, backoff en nack — contrato en `docs/specs/broker-colas.md`). El loop de
+consumo sobrevive blips del broker (`error_broker`, nunca tumba el proceso). Apagado
+ordenado por SIGTERM/SIGINT. El dispatcher de outbox corre en loop solo con
+`WORKER_OUTBOX_MODE=console` (dev: `ConsoleSender` marca enviado SIN enviar; el sender
+real de Meta es A3 del plan).
+
+El handler de dominio en `src/domain/`:
 
 - Lee `inbound_messages` por `wamid` con `FOR UPDATE`.
 - Respeta idempotencia por `processed_at`.
@@ -24,8 +34,17 @@ primer handler de dominio en `src/domain/`:
   toma pendientes/fallidos con `FOR UPDATE SKIP LOCKED`, usa un `OutboxSender` inyectable,
   marca `enviado` con `wamid_salida` o `fallido` con backoff exponencial.
 
-Pendiente para completar el camino runtime productivo: consumidor real del broker,
-Claude/tool loop model-backed, extractores y sender real de Meta para el outbox.
+El outbox ya es productivo (A3, `docs/specs/outbox-whatsapp.md`): dispatcher
+claim→send→mark en transacciones separadas con taxonomia de errores Meta
+(permanente→`descartado`+audit, rate-limit corta el batch, transitorio con backoff y tope
+`max_intentos`), y `MetaOutboxSender` real (`src/outbox/meta-sender.ts`: texto con chunking
+4096, plantillas con `payload.variables`, documento por link, `WORKER_OUTBOX_MODE=meta`
+fail-closed en config).
+
+Pendiente para completar el camino runtime productivo: persistencia de conversaciones (A4),
+Claude/tool loop model-backed (A5), extractores y camino del proveedor (A6) y cron E1 (A7)
+— ver `docs/PLAN_FASE2A_2B_CONTROL_CENTER.md`. El consumidor Azure y el sender Meta estan
+validados con fakes; falta validarlos contra Azurite/Meta real al desplegar (D-3 del plan).
 
 ## Invariantes del dominio
 

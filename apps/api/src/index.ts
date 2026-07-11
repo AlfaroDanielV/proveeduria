@@ -11,19 +11,36 @@
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import pg from 'pg';
+import { crearAuditInserter, withTx } from '@proveeduria/agent';
+import type { Actor } from '@proveeduria/agent';
 
 import { cargarConfig } from './config.js';
 import type { Config } from './config.js';
+import type { AttachmentBlobStore } from './attachments/store.js';
+import { PgAttachmentBlobStore } from './attachments/store.js';
+import type { AttachmentsDeps } from './attachments/routes.js';
+import { manejarAttachmentsApi } from './attachments/routes.js';
 import { verificarFirma, verificarChallenge } from './webhook/verify.js';
 import { parseMeta } from './webhook/parse.js';
-import { ingestar } from './webhook/ingest.js';
+import { aplicarStatuses, ingestar } from './webhook/ingest.js';
+import type { EntregaStore } from './db/entregas.js';
+import { PgEntregaStore } from './db/entregas.js';
 import type { InboundStore } from './db/inbound.js';
 import { PgInboundStore } from './db/inbound.js';
 import type { QueueClient } from './queue/index.js';
 import { AzureStorageQueue, InMemoryQueue } from './queue/index.js';
-import type { PortalStore } from './portal/types.js';
+import type { AprobacionesStore, PortalStore, ProveedoresStore, RevisionesStore } from './portal/types.js';
 import { PgPortalStore } from './portal/repo.js';
+import type { AuthStore } from './portal/auth-store.js';
+import { PgAuthStore } from './portal/auth-store.js';
+import { PgProveedoresStore } from './portal/proveedores-store.js';
+import { PgRevisionesStore } from './portal/revisiones-store.js';
+import { PgAprobacionesStore } from './portal/aprobaciones-store.js';
+import { crearEjecutorToolPedido } from './portal/acciones-pedido.js';
+import type { EmitirCredencialesInput } from './portal/auth-routes.js';
+import type { PortalDeps } from './portal/routes.js';
 import { manejarPortalApi } from './portal/routes.js';
+import { crearLimitadorLogin } from './portal/rate-limit.js';
 
 const { Pool } = pg;
 
@@ -35,6 +52,13 @@ export interface Dependencias {
   readonly store: InboundStore;
   readonly queue: QueueClient;
   readonly portalStore: PortalStore;
+  readonly authStore: AuthStore;
+  readonly proveedoresStore: ProveedoresStore;
+  readonly revisionesStore: RevisionesStore;
+  readonly aprobacionesStore: AprobacionesStore;
+  readonly entregas: EntregaStore;
+  readonly attachmentsStore: AttachmentBlobStore;
+  readonly pool: pg.Pool;
 }
 
 function leerCuerpoCrudo(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
@@ -60,13 +84,68 @@ function encabezadoFirma(req: IncomingMessage): string {
   return typeof h === 'string' ? h : '';
 }
 
+/**
+ * Alta/reset de credencial + `audit_events('credencial_emitida')` en LA MISMA transaccion
+ * (control-center.md; docs/specs/portal-api.md §usuarios/:id/credenciales). Unico punto de
+ * `PortalDeps` que abre una transaccion explicita: el resto de operaciones de auth son
+ * escrituras de una sola sentencia (atomicas por si solas via el pool).
+ */
+function crearEmitirCredenciales(pool: pg.Pool): (input: EmitirCredencialesInput) => Promise<void> {
+  return (input) =>
+    withTx(pool, async (tx) => {
+      await new PgAuthStore(tx).crearOResetearCredencial(input.targetUserId, input.passwordHash);
+      const actor: Actor = { userId: input.actorUserId, roles: [], nombre: '' };
+      await crearAuditInserter(tx, actor, input.ahora, 'web')({
+        accion: 'credencial_emitida',
+        entidad: 'user_credentials',
+        entidadId: input.targetUserId,
+      });
+    });
+}
+
+function crearPortalDeps(deps: Dependencias): PortalDeps {
+  const { config, portalStore, authStore, proveedoresStore, revisionesStore, aprobacionesStore, pool } = deps;
+  return {
+    store: portalStore,
+    authStore,
+    portalStore,
+    proveedoresStore,
+    revisionesStore,
+    aprobacionesStore,
+    ejecutarToolPedido: crearEjecutorToolPedido(pool),
+    portalJwtSecret: config.portalJwtSecret,
+    portalOrigin: config.portalOrigin,
+    esProduccion: config.nodeEnv === 'production',
+    ahora: () => new Date(),
+    emitirCredenciales: crearEmitirCredenciales(pool),
+    // Singleton por proceso: 5 fallos/15min por identificador, 20/15min por IP.
+    limitadorLogin: crearLimitadorLogin(),
+  };
+}
+
+function crearAttachmentsDeps(deps: Dependencias): AttachmentsDeps {
+  return {
+    store: deps.attachmentsStore,
+    secreto: deps.config.attachmentsLinkSecret,
+    ahora: () => new Date(),
+  };
+}
+
 export function crearManejador(deps: Dependencias) {
-  const { config, store, queue, portalStore } = deps;
+  const { config, store, queue, entregas } = deps;
+  const portalDeps = crearPortalDeps(deps);
+  const attachmentsDeps = crearAttachmentsDeps(deps);
 
   return async function manejar(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
 
-    if (await manejarPortalApi(req, res, { store: portalStore })) {
+    // Adjuntos: publico, sin cookie de sesion (Meta lo descarga). ANTES del portal para no
+    // pasar por CSRF/auth de sesion que no aplica aqui (docs/specs/outbox-whatsapp.md).
+    if (await manejarAttachmentsApi(req, res, attachmentsDeps)) {
+      return;
+    }
+
+    if (await manejarPortalApi(req, res, portalDeps)) {
       return;
     }
 
@@ -118,7 +197,7 @@ export function crearManejador(deps: Dependencias) {
         return;
       }
 
-      const mensajes = parseMeta(payload);
+      const { mensajes, statuses } = parseMeta(payload);
 
       // 3-4. Persistir + encolar (idempotente por wamid). Si falla, 500 -> Meta reintenta.
       try {
@@ -126,6 +205,19 @@ export function crearManejador(deps: Dependencias) {
       } catch (e) {
         // eslint-disable-next-line no-console
         console.error('ingesta fallida', e);
+        res.writeHead(500);
+        res.end();
+        return;
+      }
+
+      // Statuses de entrega (value.statuses[]): INLINE, sin cola (UPDATE indexado por
+      // wamid_salida, docs/specs/outbox-whatsapp.md). Un error de DB aqui tambien
+      // responde 500; es seguro porque aplicar un status es idempotente (Meta reintenta).
+      try {
+        await aplicarStatuses(statuses, entregas);
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.error('aplicar statuses de entrega fallido', e);
         res.writeHead(500);
         res.end();
         return;
@@ -162,9 +254,27 @@ function main(): void {
   const pool = new Pool({ connectionString: config.databaseUrl });
   const store = new PgInboundStore(pool);
   const portalStore = new PgPortalStore(pool);
+  const authStore = new PgAuthStore(pool);
+  const proveedoresStore = new PgProveedoresStore(pool);
+  const revisionesStore = new PgRevisionesStore(pool);
+  const aprobacionesStore = new PgAprobacionesStore(pool);
+  const entregas = new PgEntregaStore(pool);
+  const attachmentsStore = new PgAttachmentBlobStore(pool);
   const queue = crearQueue(config);
 
-  const manejar = crearManejador({ config, store, queue, portalStore });
+  const manejar = crearManejador({
+    config,
+    store,
+    queue,
+    portalStore,
+    authStore,
+    proveedoresStore,
+    revisionesStore,
+    aprobacionesStore,
+    entregas,
+    attachmentsStore,
+    pool,
+  });
   const server = createServer((req, res) => {
     manejar(req, res).catch((e: unknown) => {
       // eslint-disable-next-line no-console

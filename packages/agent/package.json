@@ -11,7 +11,9 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.test.json",
@@ -19,6 +21,10 @@
   },
   "dependencies": {
     "@proveeduria/core": "*",
+    "pdfkit": "^0.19.1",
     "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/pdfkit": "^0.17.6"
   }
 }

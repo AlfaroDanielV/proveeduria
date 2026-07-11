@@ -4,7 +4,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { InMemoryConsumer } from './queue/index.js';
-import type { Job } from './queue/index.js';
+import type { Job, QueueConsumer } from './queue/index.js';
 import type { JobHandler, LogSink } from './handlers/echo.js';
 import { crearEchoHandler } from './handlers/echo.js';
 import { procesarUno, correrLoop } from './consumer.js';
@@ -14,10 +14,6 @@ function jobDePrueba(overrides: Partial<Job> = {}): Job {
   return {
     id: 'j1',
     wamid: 'wamid.ABC',
-    fromPhone: '+50688887777',
-    tipo: 'text',
-    payload: { text: 'hola' },
-    recibidoEn: '2026-07-07T00:00:00.000Z',
     intento: 1,
     ...overrides,
   };
@@ -71,6 +67,38 @@ describe('procesarUno', () => {
     // Reencolado para reintento con el contador incrementado.
     expect(consumer.profundidad).toBe(1);
   });
+
+  it('reporta error_broker sin propagar cuando poll() lanza', async () => {
+    const consumer: QueueConsumer = {
+      poll: () => Promise.reject(new Error('azure caido')),
+      ack: () => Promise.resolve(),
+      nack: () => Promise.resolve(),
+    };
+    const { sink, eventos } = logSpy();
+
+    const ciclo = await procesarUno({ consumer, handler: crearEchoHandler(sink), log: sink });
+
+    expect(ciclo.estado).toBe('error_broker');
+    expect(eventos).toContain('broker.error_poll');
+  });
+
+  it('no propaga cuando el nack tambien falla tras un fallo del handler', async () => {
+    const job = jobDePrueba();
+    const consumer: QueueConsumer = {
+      poll: () => Promise.resolve(job),
+      ack: () => Promise.resolve(),
+      nack: () => Promise.reject(new Error('nack roto')),
+    };
+    const handler: JobHandler = {
+      manejar: () => Promise.reject(new Error('fallo del handler')),
+    };
+    const { sink, eventos } = logSpy();
+
+    const ciclo = await procesarUno({ consumer, handler, log: sink });
+
+    expect(ciclo.estado).toBe('reintentar');
+    expect(eventos).toContain('broker.error_nack');
+  });
 });
 
 describe('correrLoop', () => {
@@ -91,6 +119,37 @@ describe('correrLoop', () => {
     expect(consumer.reconocidos.map((j) => j.id)).toEqual(['j1', 'j2', 'j3']);
     expect(consumer.profundidad).toBe(0);
   });
+
+  it('sobrevive un blip del broker en modo long-poll y sigue procesando', async () => {
+    // poll: lanza 1 vez, luego entrega un job, luego cola vacia (abortamos ahi).
+    const job = jobDePrueba();
+    const abort = new AbortController();
+    let llamada = 0;
+    const consumer: QueueConsumer = {
+      poll: () => {
+        llamada += 1;
+        if (llamada === 1) return Promise.reject(new Error('blip azure'));
+        if (llamada === 2) return Promise.resolve(job);
+        abort.abort();
+        return Promise.resolve(null);
+      },
+      ack: () => Promise.resolve(),
+      nack: () => Promise.resolve(),
+    };
+    const { sink, eventos } = logSpy();
+
+    const procesados = await correrLoop({
+      consumer,
+      handler: crearEchoHandler(sink),
+      log: sink,
+      detenerAlVaciar: false,
+      esperaVacioMs: 1, // la espera post-error usa max(esperaVacioMs, 1000); abortamos antes
+      signal: abort.signal,
+    });
+
+    expect(procesados).toBe(1);
+    expect(eventos).toContain('broker.error_poll');
+  }, 10000);
 });
 
 describe('arrancar', () => {

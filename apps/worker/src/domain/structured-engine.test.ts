@@ -31,10 +31,6 @@ function input(payload: unknown, tx: Tx): DomainEngineInput {
     job: {
       id: 'job-1',
       wamid: 'wamid.1',
-      fromPhone: '+50688880002',
-      tipo: 'texto',
-      payload,
-      recibidoEn: AHORA.toISOString(),
       intento: 1,
     },
     mensaje,
@@ -77,5 +73,36 @@ describe('crearStructuredToolEngine', () => {
     expect(tx.queries[0]?.params[2]).toBe('worker_tool_call');
     expect(tx.queries[1]?.sql).toContain('INSERT INTO outbox_messages');
     expect(tx.queries[1]?.params[0]).toBe('+50688880002');
+  });
+
+  it('propaga el pedidoId del input a audit_events.pedido_id', async () => {
+    const tx = new FakeTx();
+    const engine = crearStructuredToolEngine();
+
+    await engine.procesar(input({
+      tool_call: {
+        name: 'generar_comparativo',
+        input: { pedidoId: 'PED-2026-0007' },
+      },
+    }, tx));
+
+    // pedido_id es el 6to placeholder ($6): despues del entidad_id ($5).
+    expect(tx.queries[0]?.params[2]).toBe('worker_tool_call');
+    expect(tx.queries[0]?.params[5]).toBe('PED-2026-0007');
+  });
+
+  it('deja pedido_id null cuando el input de la tool no trae pedidoId', async () => {
+    const tx = new FakeTx();
+    const engine = crearStructuredToolEngine();
+
+    await engine.procesar(input({
+      tool_call: {
+        name: 'crear_pedido',
+        input: { descripcion: 'cemento y varilla' },
+      },
+    }, tx));
+
+    expect(tx.queries[0]?.params[2]).toBe('worker_tool_call');
+    expect(tx.queries[0]?.params[5]).toBeNull();
   });
 });

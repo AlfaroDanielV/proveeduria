@@ -13,11 +13,15 @@ Hay dos sistemas conviviendo:
 - **Sistema nuevo Modulo 1**: monorepo TypeScript en `packages/*` y `apps/*`. Este es el camino
   de produccion definido por `docs/EXECUTION_PLAN.md`.
 
-El sistema nuevo esta en **Fase 2a**. El hito navegable pedido -> cotizaciones -> comparativo
-ya existe con harness estructurado: tools deterministicas hasta `pedido.estado = en_revision`,
-worker domain handler/router, API REST de portal y `apps/portal` para navegar lista/detalle/
-comparativo. Aun falta endurecer el runtime productivo: prompt/modelo Claude, extractores,
-broker real y sender real de Meta para outbox.
+El sistema nuevo cerro gran parte de Fase 2a y arranco 2b/Centro de Control (ver
+`docs/PLAN_FASE2A_2B_CONTROL_CENTER.md` §Progreso y `docs/handoff/FASE2A-current-status.md`):
+tools deterministicas hasta `en_revision` + comparativo, broker durable de Azure Storage
+Queues (producer+consumer reales), outbox productivo con sender real de Meta
+(claim→send→mark, taxonomia de errores, statuses), composition root real del worker, portal
+React+Vite con auth real (login scrypt + JWT cookie; el seam `X-User-Id` fue eliminado),
+CRUD de proveedores y cola de revision, y los helpers 2b de core (OC, cobertura, E3/E9/E13,
+pausa). Falta: conversaciones (A4), loop Claude model-backed (A5), extractores (A6), cron E1
+(A7), cadena de tools B3-B8 y despliegue (D).
 
 ## Mapa principal
 
@@ -32,6 +36,9 @@ broker real y sender real de Meta para outbox.
   - `exceptions.md`: reglas E1-E13.
   - `portal-api.md`: contrato REST del portal Fase 2a.
   - `templates-whatsapp.md`: plantillas candidatas de WhatsApp.
+  - `broker-colas.md`: contrato del broker de ingesta api→worker (wire format, visibility, veneno).
+  - `outbox-whatsapp.md`: dispatcher claim→send→mark, taxonomia de errores Meta, statuses.
+  - `control-center.md`: portal interno — auth real, matriz de permisos web, pantallas por olas.
 - `docs/handoff/FASE2A-current-status.md`: estado operativo actual para continuar Fase 2a.
 - `docs/handoff/FASE2A-next-session-prompt.md`: prompt copy-paste para arrancar una sesion
   nueva desde el punto exacto del cierre Fase 2a navegable.
@@ -44,11 +51,21 @@ broker real y sender real de Meta para outbox.
 Dominio puro, sin IO.
 
 - `src/types.ts`: vocabulario congelado del dominio: roles, estados, codigos de excepcion,
-  tipos de aprobacion, umbrales.
+  tipos de aprobacion, umbrales (incluye `similitudMinFacturaOc`), `CampoExtraido<T>`/
+  `CamposFacturaExtraida`.
 - `src/roles.ts`: matriz tool -> roles permitidos y `puedeUsarTool`.
-- `src/state-machine.ts`: tabla de transiciones y `puedeTransicionar`.
+- `src/state-machine.ts`: tabla de transiciones del pedido y `puedeTransicionar`.
+- `src/oc-state-machine.ts`: tabla de transiciones de la OC y `puedeTransicionarOc`/
+  `esTerminalOc` (state-machine.md §Ciclo de la OC).
 - `src/numbering.ts`: formateo/parsing PED/OC; el lock real vive en DB.
-- `src/exceptions.ts`: reglas deterministicas E1, E2, E4, E5, E9, E10, E12, E13.
+- `src/exceptions.ts`: reglas deterministicas E1, E2, E4, E5, E9 (incluye evaluacion
+  por-campo), E10, E12, E13 (incluye reincidencia), y umbrales por defecto.
+- `src/recepcion.ts`: computo de cobertura de recepcion de OC/pedido y sugerencia de cierre
+  (state-machine.md §Computo de cobertura, reglas duras 3 y 4).
+- `src/matching.ts`: matching deterministico factura<->OC (E3): normalizacion, similitud de
+  tokens y score ponderado.
+- `src/agent-control.ts`: predicado de pausa del agente por alcance (control-center.md
+  §Pausa del agente).
 - `src/policy.ts`: acciones que requieren `approval_events`.
 
 Regla: si una regla de negocio cambia, primero cambia la spec y despues los tests/core.
@@ -63,10 +80,17 @@ Migraciones SQL versionadas e idempotent seeds.
 - `migrations/003_*`: OC, facturas, recepcion, notas de credito, equipos.
 - `migrations/004_*`: inbound/outbox, review queue, approval/audit append-only, vistas.
 - `migrations/005_pedidos_confirmacion.sql`: `confirmado_at` / `confirmado_por`.
+- `migrations/006_portal_auth.sql`: `user_credentials` + `portal_sessions` (Centro de Control).
+- `migrations/007_outbox_envio.sql`: outbox productivo (`enviando`/`descartado`, lease,
+  `max_intentos`, adjunto, columnas `entrega_*` de statuses).
+- `migrations/008_agent_control_config.sql`: `agent_control` (pausa del agente) + umbral E3.
+- `migrations/009_oc_equipos_guardias.sql`: trigger de transiciones de OC + recomputo de
+  `cantidad_activa` + inmutabilidad de `equipment_movements`.
 - `seeds/001_base.sql`: roles, usuarios, proyectos y proveedores de prueba.
 - `scripts/migrate.mjs`: aplica migraciones y seeds.
 
-Regla: no edites migraciones ya aplicadas; agrega `006_*.sql` si falta schema.
+Regla: no edites migraciones ya aplicadas; agrega `010_*.sql` si falta schema (bloques
+reservados por workstream en packages/db/CLAUDE.md).
 
 ### `packages/agent/`
 
@@ -101,28 +125,36 @@ inyectable. Falta conectar el adapter real de Claude/prompt humano para conversa
 Webhook production-safe + REST de portal.
 
 - `src/webhook/verify.ts`: verifica firma `X-Hub-Signature-256`.
-- `src/webhook/parse.ts`: parsea payload Meta.
-- `src/webhook/ingest.ts`: persiste inbound y encola solo si `wamid` es nuevo.
-- `src/db/inbound.ts`: `PgInboundStore` + fake.
-- `src/queue/`: interfaz de cola y stub Azure.
-- `src/config.ts`: fail-closed para secretos/config.
-- `src/portal/`: endpoints `/api/portal/me`, `/api/portal/pedidos`,
-  `/api/portal/pedidos/:id` y `/api/portal/pedidos/:id/comparativo`.
+- `src/webhook/parse.ts`: parsea payload Meta (mensajes + `statuses` de entrega).
+- `src/webhook/ingest.ts`: persiste inbound, encola solo si `wamid` es nuevo, y aplica
+  statuses al outbox (`aplicarStatuses`).
+- `src/db/inbound.ts` / `src/db/entregas.ts`: stores PG + fakes (entregas = guard
+  monotonico sent<delivered<read).
+- `src/queue/`: interfaz de cola + `AzureStorageQueue` real (wire `{v:1,wamid}` base64,
+  ver docs/specs/broker-colas.md).
+- `src/config.ts`: fail-closed para secretos/config (incluye `PORTAL_JWT_SECRET`/`PORTAL_ORIGIN`).
+- `src/portal/`: auth real (crypto.ts scrypt+JWT, auth-store/auth-routes, rate-limit) y
+  endpoints: `/me`, pedidos (lista/detalle/comparativo), `auth/*`, proveedores CRUD +
+  contactos + opt-in/BAJA, revisiones (lista/resolver). Contrato en docs/specs/portal-api.md.
 
-Flujo actual de webhook: payload Meta -> verificar/parsear -> `inbound_messages` -> queue.
-Flujo actual de portal: `X-User-Id` -> resolver roles/alcance -> SQL parametrizado ->
-JSON para `apps/portal`.
+Flujo actual de webhook: payload Meta -> verificar/parsear -> `inbound_messages` -> Azure
+Storage Queue -> worker; statuses -> UPDATE de outbox. Flujo actual de portal: cookie
+`portal_token` (JWT verificado en servidor) -> actor por DB -> roles/alcance -> SQL
+parametrizado; mutaciones con CSRF header + audit transaccional.
 
 ### `apps/portal/`
 
-Portal nuevo Fase 2a, estatico y sin dependencias externas.
+Centro de Control (React 19 + Vite; invariantes en apps/portal/CLAUDE.md).
 
-- `src/index.html`: shell operativo para pedidos, detalle y comparativo.
-- `src/app.js`: cliente REST contra `/api/portal`, selector de usuario sembrado y filtros.
-- `src/styles.css`: UI responsive de trabajo, sin lecturas directas a Postgres/Supabase.
-- `scripts/build.mjs`: copia `src` a `dist`.
-- `scripts/check.mjs`: smoke test del contrato minimo.
-- `scripts/dev-server.mjs`: servidor estatico local.
+- `src/api/cliente.ts`: unico cliente HTTP (cookies httpOnly, CSRF automatico en
+  mutaciones, 401 -> un refresh y reintento).
+- `src/components/`: Login/CambiarPassword, Shell con nav por rol, pedidos
+  (lista/detalle/comparativo), proveedores (CRUD/contactos/opt-in/BAJA), revisiones
+  (resolver).
+- `src/permisos.ts`: espejo UI de la matriz de control-center.md (la verdad vive en el
+  servidor).
+- `npm run dev` = Vite con proxy `/api` -> `localhost:8080`; `npm run build` -> `dist/`;
+  `npm run typecheck` y `npm run test` (vitest + testing-library) cableados.
 
 ### `apps/worker/`
 

@@ -1,8 +1,10 @@
 import type { Tx } from '@proveeduria/agent';
 import type { InboundMessage, UnknownSenderReporter } from './types.js';
 
+// Identidad segun templates-whatsapp.md ("Asistente de Proveeduria de Atemporal");
+// E11 no revela datos a un remitente desconocido, solo la identidad y el siguiente paso.
 const TEXTO_DESCONOCIDO =
-  'Hola. Soy el Asistente de Proveeduria de Proyekta. ' +
+  'Hola. Soy el Asistente de Proveeduria de Atemporal. ' +
   'No tengo este numero registrado para gestionar pedidos o cotizaciones. ' +
   'Voy a avisarle al equipo interno para revisar el acceso.';
 

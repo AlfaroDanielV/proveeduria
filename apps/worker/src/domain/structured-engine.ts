@@ -19,6 +19,19 @@ function resultPayload(result: ResultadoToolCall): ToolResultPayload {
   return { ok: false, tool: result.tool, error: result.error };
 }
 
+/**
+ * Extrae `pedidoId` del input de la tool si viene como string no vacio, para poblar
+ * `audit_events.pedido_id`. Tools como `crear_pedido` (que aun no tienen pedido) devuelven
+ * `null` y la fila se audita sin pedido asociado.
+ */
+function extraerPedidoIdDeInput(input: unknown): string | null {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    return null;
+  }
+  const rec = input as Record<string, unknown>;
+  return typeof rec.pedidoId === 'string' && rec.pedidoId.trim() !== '' ? rec.pedidoId : null;
+}
+
 export function crearStructuredToolEngine(): DomainEngine {
   return {
     async procesar(input: DomainEngineInput): Promise<void> {
@@ -55,16 +68,18 @@ export function crearStructuredToolEngine(): DomainEngine {
           },
         } satisfies ToolResultPayload
         : resultPayload(await ejecutarToolCallFase2a(call, input.ctx));
+      const pedidoId = extraerPedidoIdDeInput(call.input);
       await input.tx.query(
         'INSERT INTO audit_events ' +
           '(actor_user_id, actor_sistema, accion, entidad, entidad_id, pedido_id, antes, despues, origen, at) ' +
-          'VALUES ($1, $2, $3, $4, $5, null, null, $6::jsonb, $7, $8)',
+          'VALUES ($1, $2, $3, $4, $5, $6, null, $7::jsonb, $8, $9)',
         [
           input.ctx?.actor.userId ?? null,
           input.ctx === undefined,
           'worker_tool_call',
           'inbound_message',
           input.mensaje.id,
+          pedidoId,
           JSON.stringify({
             wamid: input.mensaje.wamid,
             tool: call.name,

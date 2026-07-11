@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import type { UmbralesConfig } from './types.js';
+import type { CamposFacturaExtraida, CampoExtraido, UmbralesConfig } from './types.js';
 import {
+  alquilerDebeCerrarse,
   cotizacionIncompleta,
   cotizacionVencida,
   devolucionExcedeInventario,
   diferenciaMontoSignificativa,
   diferenciaRecepcion,
+  esRecordatorioReincidente,
+  evaluarExtraccionFactura,
   excedioRepreguntas,
   extraccionBajaConfianza,
   horasEntre,
@@ -193,5 +196,144 @@ describe('E12 transicionInvalida', () => {
   it('false para una transicion valida', () => {
     expect(transicionInvalida('borrador', 'cotizando')).toBe(false);
     expect(transicionInvalida('recepcion_total', 'cerrado')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Casos nuevos (B1): E3 default, E9 por-campo, E13 reincidencia, alquiler.
+// Agregados sin tocar los describes/its existentes de arriba.
+// ---------------------------------------------------------------------------
+
+describe('UMBRALES_DEFAULT (E3 - similitudMinFacturaOc)', () => {
+  it('tiene el valor inicial de la spec (exceptions.md fila E3)', () => {
+    expect(U.similitudMinFacturaOc).toBe(0.6);
+  });
+});
+
+describe('E9 evaluarExtraccionFactura', () => {
+  const campo = <T>(valor: T | null, confianza: number): CampoExtraido<T> => ({ valor, confianza });
+
+  const camposAltaConfianza = (): CamposFacturaExtraida => ({
+    numeroFactura: campo('F-001', 0.95),
+    montoTotal: campo(100_000, 0.95),
+    fecha: campo('2026-07-01', 0.95),
+    proveedorNombre: campo('Ferreteria X', 0.95),
+  });
+
+  it('todos los campos con confianza alta: sin dudosos, no dispara E9', () => {
+    const r = evaluarExtraccionFactura(camposAltaConfianza(), U);
+    expect(r).toEqual({ camposDudosos: [], disparaE9: false });
+  });
+
+  it('exactamente en el umbral (0.85) NO es dudoso (misma frontera que extraccionBajaConfianza)', () => {
+    const campos = camposAltaConfianza();
+    const conUmbral: CamposFacturaExtraida = {
+      ...campos,
+      numeroFactura: campo('F-001', 0.85),
+    };
+    const r = evaluarExtraccionFactura(conUmbral, U);
+    expect(r.camposDudosos).not.toContain('numeroFactura');
+    expect(r.disparaE9).toBe(false);
+  });
+
+  it('numeroFactura dudoso (campo critico) dispara E9', () => {
+    const campos: CamposFacturaExtraida = {
+      ...camposAltaConfianza(),
+      numeroFactura: campo('F-001', 0.5),
+    };
+    const r = evaluarExtraccionFactura(campos, U);
+    expect(r.camposDudosos).toEqual(['numeroFactura']);
+    expect(r.disparaE9).toBe(true);
+  });
+
+  it('montoTotal dudoso (campo critico) dispara E9', () => {
+    const campos: CamposFacturaExtraida = {
+      ...camposAltaConfianza(),
+      montoTotal: campo(100_000, 0.1),
+    };
+    const r = evaluarExtraccionFactura(campos, U);
+    expect(r.camposDudosos).toEqual(['montoTotal']);
+    expect(r.disparaE9).toBe(true);
+  });
+
+  it('fecha dudosa (campo no critico) se reporta pero NO dispara E9 por si sola', () => {
+    const campos: CamposFacturaExtraida = {
+      ...camposAltaConfianza(),
+      fecha: campo('2026-07-01', 0.3),
+    };
+    const r = evaluarExtraccionFactura(campos, U);
+    expect(r.camposDudosos).toEqual(['fecha']);
+    expect(r.disparaE9).toBe(false);
+  });
+
+  it('proveedorNombre dudoso (campo no critico) se reporta pero NO dispara E9 por si solo', () => {
+    const campos: CamposFacturaExtraida = {
+      ...camposAltaConfianza(),
+      proveedorNombre: campo('Ferreteria X', 0.2),
+    };
+    const r = evaluarExtraccionFactura(campos, U);
+    expect(r.camposDudosos).toEqual(['proveedorNombre']);
+    expect(r.disparaE9).toBe(false);
+  });
+
+  it('mezcla de campos dudosos: orden canonico y disparaE9 si hay al menos un critico', () => {
+    const campos: CamposFacturaExtraida = {
+      numeroFactura: campo('F-001', 0.95),
+      montoTotal: campo(100_000, 0.4),
+      fecha: campo('2026-07-01', 0.4),
+      proveedorNombre: campo('Ferreteria X', 0.95),
+    };
+    const r = evaluarExtraccionFactura(campos, U);
+    expect(r.camposDudosos).toEqual(['montoTotal', 'fecha']);
+    expect(r.disparaE9).toBe(true);
+  });
+
+  it('todos los campos dudosos: orden canonico completo y dispara E9', () => {
+    const campos: CamposFacturaExtraida = {
+      numeroFactura: campo<string>(null, 0),
+      montoTotal: campo<number>(null, 0),
+      fecha: campo<string>(null, 0),
+      proveedorNombre: campo<string>(null, 0),
+    };
+    const r = evaluarExtraccionFactura(campos, U);
+    expect(r.camposDudosos).toEqual(['numeroFactura', 'montoTotal', 'fecha', 'proveedorNombre']);
+    expect(r.disparaE9).toBe(true);
+  });
+
+  it('fecha y proveedor dudosos simultaneamente sin criticos: no dispara E9', () => {
+    const campos: CamposFacturaExtraida = {
+      ...camposAltaConfianza(),
+      fecha: campo('2026-07-01', 0.1),
+      proveedorNombre: campo('Ferreteria X', 0.1),
+    };
+    const r = evaluarExtraccionFactura(campos, U);
+    expect(r.camposDudosos).toEqual(['fecha', 'proveedorNombre']);
+    expect(r.disparaE9).toBe(false);
+  });
+});
+
+describe('E13 esRecordatorioReincidente', () => {
+  it('cero recordatorios previos: el que se emitiria es el 1.º -> no reincidente', () => {
+    expect(esRecordatorioReincidente(0)).toBe(false);
+  });
+  it('un recordatorio previo: el que se emitiria es el 2.º -> reincidente', () => {
+    expect(esRecordatorioReincidente(1)).toBe(true);
+  });
+  it('mas de un recordatorio previo -> reincidente', () => {
+    expect(esRecordatorioReincidente(2)).toBe(true);
+    expect(esRecordatorioReincidente(5)).toBe(true);
+  });
+});
+
+describe('alquilerDebeCerrarse', () => {
+  it('cantidad activa en 0 -> debe cerrarse', () => {
+    expect(alquilerDebeCerrarse(0)).toBe(true);
+  });
+  it('cantidad activa positiva -> no debe cerrarse', () => {
+    expect(alquilerDebeCerrarse(1)).toBe(false);
+    expect(alquilerDebeCerrarse(10)).toBe(false);
+  });
+  it('cantidad activa negativa: invariante imposible -> lanza RangeError', () => {
+    expect(() => alquilerDebeCerrarse(-1)).toThrow(RangeError);
   });
 });

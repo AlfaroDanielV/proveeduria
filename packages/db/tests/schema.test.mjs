@@ -40,6 +40,7 @@ test('tablas clave existen', async () => {
     'equipment_rentals', 'equipment_movements',
     'conversations', 'inbound_messages', 'outbox_messages', 'review_queue',
     'approval_events', 'audit_events', 'feedback',
+    'user_credentials', 'portal_sessions', 'agent_control', 'attachment_blobs',
   ];
   const { rows } = await client.query(
     `select table_name from information_schema.tables

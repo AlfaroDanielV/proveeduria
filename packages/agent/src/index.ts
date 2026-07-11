@@ -56,7 +56,16 @@ export * from './runtime/audit.js';
 export * from './runtime/outbox.js';
 export * from './runtime/repos.js';
 export * from './runtime/context.js';
+export * from './runtime/approval-ganador.js';
+// Fakes de testing (FakeToolStore/crearFakeRepos/crearFakeCtx/withFakeCtx): expuestos desde
+// el paquete para que otros workspaces (p.ej. apps/api, tests de rutas del portal) puedan
+// ejercitar las tools REALES contra un Ctx en memoria sin reimplementar el dominio ni abrir
+// Postgres (docs/specs/portal-api.md §Aprobaciones y acciones de pedido).
+export * from './runtime/fakes.js';
+export * from './pdf/oc-pdf.js';
 export * from './tools/pedido.js';
+export * from './tools/adjudicacion.js';
+export * from './tools/oc.js';
 export * from './agent/types.js';
 export * from './agent/structured.js';
 export * from './agent/tool-dispatcher.js';

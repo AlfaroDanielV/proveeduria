@@ -480,7 +480,7 @@ function detalleItems(items: readonly PedidoItem[]): string {
     .join('\n');
 }
 
-function canalAprobacionDesdeCtx(ctx: Ctx): 'whatsapp' | 'web' {
+export function canalAprobacionDesdeCtx(ctx: Ctx): 'whatsapp' | 'web' {
   return ctx.origen === 'web' ? 'web' : 'whatsapp';
 }
 
@@ -519,11 +519,18 @@ function portalPathComparativo(pedidoId: string): string {
   return `/pedidos/${pedidoId}/comparativo`;
 }
 
-function formatCRC(value: number): string {
+/** Formato compartido CRC (montos de comparativo/RFQ y, via emitir_oc, del PDF/outbox de la OC). */
+export function formatCRC(value: number): string {
   return `CRC ${value.toFixed(2)}`;
 }
 
-function resumirProveedores(
+/**
+ * Agrega las filas item x proveedor del comparativo en un resumen por proveedor
+ * (totales, faltantes, ultima quote_response completa). Reutilizado por
+ * `aprobar_ganador` (adjudicacion.ts) para el snapshot normativo de `approval_events.detalle`
+ * (tools.md §Adjudicacion y OC): NO reimplementar esta agregacion en otra tool.
+ */
+export function resumirProveedores(
   filas: readonly ComparativoCotizacionFila[],
 ): readonly ComparativoProveedorResumen[] {
   const porProveedor = new Map<string, {

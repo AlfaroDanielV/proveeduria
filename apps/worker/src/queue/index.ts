@@ -1,39 +1,32 @@
 /**
  * Contrato de la cola que consume el worker + una implementacion en memoria para test.
  *
- * Fase 1 (stub navegable): definimos la forma minima de un `Job` y la interfaz
- * `QueueConsumer` que el loop de `consumer.ts` sabe operar (poll/ack/nack). En Fase 2
- * la implementacion real sera un consumidor de Azure Storage Queue / Service Bus que
- * ademas toma el lock advisory de Postgres por `pedido_id` antes de procesar
- * (ver apps/worker/CLAUDE.md §Invariantes y docs/EXECUTION_PLAN.md §1).
+ * `QueueConsumer` es la interfaz que el loop de `consumer.ts` sabe operar
+ * (poll/ack/nack). La implementacion real (`queue/azure.ts`) es un consumidor de Azure
+ * Storage Queues que ademas gestiona la cola de veneno `<nombre>-poison`; el lock
+ * advisory de Postgres por `pedido_id` lo toma el handler de dominio antes de procesar
+ * (ver apps/worker/CLAUDE.md §Invariantes y docs/specs/broker-colas.md).
  *
  * El `Job` NO transporta el efecto de dominio: solo referencia el mensaje entrante ya
  * persistido por `apps/api` (`inbound_messages`, idempotencia por `wamid`). El handler
- * releera el estado desde la BD en Fase 2.
+ * relee `fromPhone`/`tipo`/`payload`/timestamps desde la BD con `FOR UPDATE` — asi no
+ * existen copias stale entre broker y BD (docs/specs/broker-colas.md §Formato de mensaje).
  */
 
 /**
  * Unidad de trabajo encolada por `apps/api` tras persistir un `inbound_messages`.
- * Los campos siguen data-model.md §Mensajeria (wamid = clave de idempotencia).
+ * Wire del broker: `{ v: 1, wamid, pedidoId? }` (docs/specs/broker-colas.md).
  */
 export interface Job {
   /** Id de la entrada en cola (identifica el intento de entrega, no el mensaje). */
   readonly id: string;
   /** wamid del mensaje entrante; clave de idempotencia contra `inbound_messages`. */
   readonly wamid: string;
-  /** Telefono del remitente (E.164) que el router usara para resolver contexto. */
-  readonly fromPhone: string;
-  /** Tipo del mensaje entrante (text|image|document|audio|...). */
-  readonly tipo: string;
-  /** Payload crudo del mensaje entrante; el core/agente lo interpreta en Fase 2. */
-  readonly payload: unknown;
-  /** Momento de recepcion en ISO-8601 (received_at). */
-  readonly recibidoEn: string;
   /** Numero de intento de procesamiento (arranca en 1); crece con cada nack. */
   readonly intento: number;
   /**
    * Pedido al que pertenece el mensaje, si `apps/api` ya lo resolvio. Gobierna el
-   * lock advisory por `pedido_id` que garantiza orden por pedido (Fase 2).
+   * lock advisory por `pedido_id` que garantiza orden por pedido.
    */
   readonly pedidoId?: string;
 }

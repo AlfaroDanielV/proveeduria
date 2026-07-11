@@ -62,7 +62,9 @@ production Claude prompt/model adapter, extractors, real broker wiring, and real
 are not wired yet.
 For navigation and future sessions, read `docs/CODEBASE_GUIDE.md` and
 `docs/handoff/FASE2A-current-status.md` before continuing. If starting a fresh session, use
-`docs/handoff/FASE2A-next-session-prompt.md` as the copy-paste bootstrap.
+`docs/handoff/FASE2A-next-session-prompt.md` as the copy-paste bootstrap. The roadmap for
+closing Fase 2a, all of Fase 2b, and the control-center portal (with per-task model
+delegation) is `docs/PLAN_FASE2A_2B_CONTROL_CENTER.md`.
 
 ## Commands
 
@@ -82,8 +84,8 @@ Dashboard (from `dashboard/`):
 
 ## Known prototype limitations (do not replicate in new code)
 
-- Conversation state is an in-memory `Map` (`server.js` ~line 956) — lost on restart.
-- Webhook has no signature verification, no idempotency/dedup, and processes before persisting.
+- Conversation state is an in-memory `Map` (`server.js` ~line 1013) — lost on restart.
+- Webhook signature verification is fail-open (skipped unless `META_APP_SECRET` is set); no idempotency/dedup, and it processes before persisting.
 - Dashboard relies on broad anon RLS and client-side JWT decoding without signature verification (`dashboard/src/utils/jwt.js`).
 - WhatsApp sends are fire-and-forget (no outbox/retry).
 

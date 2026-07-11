@@ -19,11 +19,11 @@ on conflict (id) do nothing;
 -- Telefonos E.164 de placeholder (unicos); reemplazar por reales en carga piloto.
 -- ---------------------------------------------------------------------------
 insert into users (id, nombre, telefono_whatsapp, email, activo) values
-  ('20000000-0000-4000-8000-000000000001', 'Gerencia Proyekta',      '+50688880001', 'gerencia@proyekta.cr',  true),
-  ('20000000-0000-4000-8000-000000000002', 'Jose Pablo (Proveeduria)','+50688880002', 'proveeduria@proyekta.cr', true),
-  ('20000000-0000-4000-8000-000000000003', 'Bernal (Serv. Generales)','+50688880003', 'equipos@proyekta.cr',   true),
-  ('20000000-0000-4000-8000-000000000004', 'Ingeniero de Obra',       '+50688880004', 'ingenieria@proyekta.cr', true),
-  ('20000000-0000-4000-8000-000000000005', 'Bodeguero',               '+50688880005', 'bodega@proyekta.cr',    true)
+  ('20000000-0000-4000-8000-000000000001', 'Gerencia Atemporal',      '+50688880001', 'gerencia@atemporal.cr',  true),
+  ('20000000-0000-4000-8000-000000000002', 'Jose Pablo (Proveeduria)','+50688880002', 'proveeduria@atemporal.cr', true),
+  ('20000000-0000-4000-8000-000000000003', 'Bernal (Serv. Generales)','+50688880003', 'equipos@atemporal.cr',   true),
+  ('20000000-0000-4000-8000-000000000004', 'Ingeniero de Obra',       '+50688880004', 'ingenieria@atemporal.cr', true),
+  ('20000000-0000-4000-8000-000000000005', 'Bodeguero',               '+50688880005', 'bodega@atemporal.cr',    true)
 on conflict (id) do nothing;
 
 -- ---------------------------------------------------------------------------

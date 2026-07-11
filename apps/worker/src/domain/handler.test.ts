@@ -28,10 +28,6 @@ function job(overrides: Partial<Job> = {}): Job {
   return {
     id: 'job-1',
     wamid: 'wamid.1',
-    fromPhone: '+50688880002',
-    tipo: 'texto',
-    payload: { text: 'hola' },
-    recibidoEn: AHORA.toISOString(),
     intento: 1,
     ...overrides,
   };
@@ -208,7 +204,7 @@ describe('crearDomainHandler', () => {
       log: logSpy(),
     });
 
-    await handler.manejar(job({ fromPhone: '+50688881001' }));
+    await handler.manejar(job());
 
     expect(engine.inputs).toHaveLength(1);
     expect(engine.inputs[0]?.contexto.tipo).toBe('proveedor');
@@ -233,7 +229,7 @@ describe('crearDomainHandler', () => {
       log: logSpy(),
     });
 
-    await handler.manejar(job({ fromPhone: '+50689999999' }));
+    await handler.manejar(job());
 
     expect(engine.inputs).toHaveLength(0);
     expect(reporter.calls).toHaveLength(1);

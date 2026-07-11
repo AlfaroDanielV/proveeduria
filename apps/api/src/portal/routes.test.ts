@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
 import { resolverPortalRequest } from './routes.js';
+import type { PortalDeps, PortalRequest } from './routes.js';
+import { FakeAuthStore } from './auth-store.js';
+import { FakeProveedoresStore } from './proveedores-store.js';
+import { FakeRevisionesStore } from './revisiones-store.js';
+import { FakeAprobacionesStore } from './aprobaciones-store.js';
+import { COOKIE_TOKEN } from './auth-routes.js';
+import { firmarTokenDePrueba, TEST_JWT_SECRET } from './auth-test-helpers.js';
 import type {
   ComparativoPortal,
   ListaPedidosPortal,
@@ -18,7 +25,7 @@ class FakePortalStore implements PortalStore {
   actor: PortalActor | null = {
     userId: USER_ID,
     nombre: 'Jose Pablo',
-    email: 'proveeduria@proyekta.cr',
+    email: 'proveeduria@atemporal.cr',
     roles: ['admin_materiales'],
     projectIds: [],
   };
@@ -70,34 +77,83 @@ class FakePortalStore implements PortalStore {
   }
 }
 
-function req(path: string, headers: Record<string, string> = { 'x-user-id': USER_ID }) {
+function construirDeps(store: FakePortalStore): PortalDeps {
+  return {
+    store,
+    authStore: new FakeAuthStore(),
+    portalStore: store,
+    proveedoresStore: new FakeProveedoresStore(),
+    revisionesStore: new FakeRevisionesStore(),
+    aprobacionesStore: new FakeAprobacionesStore(),
+    ejecutarToolPedido: async () => {
+      throw new Error('ejecutarToolPedido no deberia invocarse en estos tests.');
+    },
+    portalJwtSecret: TEST_JWT_SECRET,
+    esProduccion: false,
+    ahora: () => new Date('2026-07-10T12:00:00.000Z'),
+    emitirCredenciales: async () => {},
+  };
+}
+
+function req(path: string, autenticado = true): PortalRequest {
   const url = new URL(path, 'http://localhost');
   return {
     method: 'GET',
     pathname: url.pathname,
     searchParams: url.searchParams,
-    headers,
+    headers: {},
+    cookies: autenticado ? { [COOKIE_TOKEN]: firmarTokenDePrueba(USER_ID) } : {},
+    body: undefined,
   };
 }
 
 describe('resolverPortalRequest', () => {
   it('ignora rutas fuera de /api/portal', async () => {
     const store = new FakePortalStore();
-    await expect(resolverPortalRequest(req('/webhook'), { store })).resolves.toBeNull();
+    await expect(resolverPortalRequest(req('/webhook'), construirDeps(store))).resolves.toBeNull();
   });
 
-  it('rechaza peticiones sin X-User-Id', async () => {
+  it('rechaza peticiones sin portal_token', async () => {
     const store = new FakePortalStore();
-    const res = await resolverPortalRequest(req('/api/portal/me', {}), { store });
+    const res = await resolverPortalRequest(req('/api/portal/me', false), construirDeps(store));
     expect(res?.status).toBe(401);
     expect(res?.body).toMatchObject({ error: 'auth_requerida' });
+  });
+
+  it('rechaza portal_token invalido con 401', async () => {
+    const store = new FakePortalStore();
+    const bad: PortalRequest = {
+      method: 'GET',
+      pathname: '/api/portal/me',
+      searchParams: new URLSearchParams(),
+      headers: {},
+      cookies: { [COOKIE_TOKEN]: 'no-es-un-jwt' },
+      body: undefined,
+    };
+    const res = await resolverPortalRequest(bad, construirDeps(store));
+    expect(res?.status).toBe(401);
+  });
+
+  it('usuario resuelto por el token pero inactivo/no encontrado -> 403', async () => {
+    const store = new FakePortalStore();
+    store.actor = null;
+    const bad: PortalRequest = {
+      method: 'GET',
+      pathname: '/api/portal/me',
+      searchParams: new URLSearchParams(),
+      headers: {},
+      cookies: { [COOKIE_TOKEN]: firmarTokenDePrueba(USER_ID) },
+      body: undefined,
+    };
+    const res = await resolverPortalRequest(bad, construirDeps(store));
+    expect(res?.status).toBe(403);
   });
 
   it('lista pedidos con filtros validados', async () => {
     const store = new FakePortalStore();
     const res = await resolverPortalRequest(
       req(`/api/portal/pedidos?estado=en_revision&projectId=${PROJECT_ID}&limit=10&offset=5`),
-      { store },
+      construirDeps(store),
     );
 
     expect(res?.status).toBe(200);
@@ -111,16 +167,17 @@ describe('resolverPortalRequest', () => {
 
   it('rechaza estado invalido', async () => {
     const store = new FakePortalStore();
-    const res = await resolverPortalRequest(req('/api/portal/pedidos?estado=listo'), { store });
+    const res = await resolverPortalRequest(req('/api/portal/pedidos?estado=listo'), construirDeps(store));
     expect(res?.status).toBe(400);
   });
 
   it('resuelve detalle y comparativo por pedido', async () => {
     const store = new FakePortalStore();
-    const detalle = await resolverPortalRequest(req(`/api/portal/pedidos/${PEDIDO_ID}`), { store });
+    const deps = construirDeps(store);
+    const detalle = await resolverPortalRequest(req(`/api/portal/pedidos/${PEDIDO_ID}`), deps);
     const comparativo = await resolverPortalRequest(
       req(`/api/portal/pedidos/${PEDIDO_ID}/comparativo`),
-      { store },
+      deps,
     );
 
     expect(detalle?.status).toBe(200);
@@ -128,5 +185,36 @@ describe('resolverPortalRequest', () => {
     expect(comparativo?.body).toMatchObject({
       pedido: { id: PEDIDO_ID, numero: 'PED-2026-001' },
     });
+  });
+
+  it('OPTIONS responde 204 sin headers CORS cuando no hay portalOrigin', async () => {
+    const store = new FakePortalStore();
+    const res = await resolverPortalRequest(
+      { method: 'OPTIONS', pathname: '/api/portal/me', searchParams: new URLSearchParams(), headers: {}, cookies: {}, body: undefined },
+      construirDeps(store),
+    );
+    expect(res?.status).toBe(204);
+    expect(res?.headers['access-control-allow-origin']).toBeUndefined();
+  });
+
+  it('con portalOrigin definido, agrega headers CORS con credentials', async () => {
+    const store = new FakePortalStore();
+    const deps = { ...construirDeps(store), portalOrigin: 'https://portal.example.com' };
+    const res = await resolverPortalRequest(
+      { method: 'OPTIONS', pathname: '/api/portal/me', searchParams: new URLSearchParams(), headers: {}, cookies: {}, body: undefined },
+      deps,
+    );
+    expect(res?.status).toBe(204);
+    expect(res?.headers['access-control-allow-origin']).toBe('https://portal.example.com');
+    expect(res?.headers['access-control-allow-credentials']).toBe('true');
+  });
+
+  it('metodo no soportado responde 405', async () => {
+    const store = new FakePortalStore();
+    const res = await resolverPortalRequest(
+      { method: 'DELETE', pathname: '/api/portal/me', searchParams: new URLSearchParams(), headers: {}, cookies: {}, body: undefined },
+      construirDeps(store),
+    );
+    expect(res?.status).toBe(405);
   });
 });

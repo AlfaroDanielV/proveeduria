@@ -1,8 +1,8 @@
 /**
- * Normaliza el payload de Meta (WhatsApp Cloud API) a `MensajeEntrante[]` tipado.
+ * Normaliza el payload de Meta (WhatsApp Cloud API) a `{ mensajes, statuses }` tipado.
  *
- * Defensivo: cualquier payload malformado devuelve `[]` sin lanzar. No hace IO ni
- * red; solo transforma datos. El `wamid` (id del mensaje) es la clave de
+ * Defensivo: cualquier payload malformado devuelve listas vacias sin lanzar. No hace
+ * IO ni red; solo transforma datos. El `wamid` (id del mensaje) es la clave de
  * idempotencia (data-model.md `inbound_messages.wamid`), asi que un mensaje sin id
  * o sin remitente se descarta.
  *
@@ -12,6 +12,10 @@
  * NO debe depender del runtime de `@proveeduria/core` (packages/core es puro pero su
  * carga se evita para mantener el ingest aislado). Si se decidiera compartir el tipo,
  * seria via `import type` desde '@proveeduria/core' (nunca import de valor).
+ *
+ * `value.statuses[]` (docs/specs/outbox-whatsapp.md "Statuses de Meta") se extrae a
+ * `StatusEntrega[]`; un `status` con `estado` fuera de `sent|delivered|read|failed` se
+ * descarta silenciosamente (status desconocido = se ignora).
  */
 
 /** Fuente de un adjunto extraible (subconjunto de `FuenteExtraccion` sin 'texto'). */
@@ -55,6 +59,33 @@ export interface MensajeEntrante {
   /** Objeto crudo del mensaje de Meta; se persiste como `payload` jsonb. */
   readonly raw: unknown;
 }
+
+/** Estados de entrega reportados por Meta que reconocemos (resto = "desconocido", se ignora). */
+export type EstadoEntrega = 'sent' | 'delivered' | 'read' | 'failed';
+
+/** `value.statuses[]` del webhook de Meta, normalizado (docs/specs/outbox-whatsapp.md). */
+export interface StatusEntrega {
+  /** `id` de Meta: es el `wamid_salida` de `outbox_messages` (lookup por indice). */
+  readonly wamid: string;
+  readonly estado: EstadoEntrega;
+  readonly timestamp?: string;
+  readonly recipientId?: string;
+  /** `errors[]` crudo de Meta cuando `estado === 'failed'`. */
+  readonly errores?: unknown;
+}
+
+/** Salida de `parseMeta`: mensajes entrantes y statuses de entrega del mismo payload. */
+export interface ResultadoParseMeta {
+  readonly mensajes: MensajeEntrante[];
+  readonly statuses: StatusEntrega[];
+}
+
+const ESTADOS_ENTREGA_VALIDOS: ReadonlySet<string> = new Set([
+  'sent',
+  'delivered',
+  'read',
+  'failed',
+]);
 
 const MAPA_TIPO: Readonly<Record<string, TipoMensaje>> = {
   text: 'texto',
@@ -150,11 +181,32 @@ function construirMensaje(m: Record<string, unknown>): MensajeEntrante | undefin
   };
 }
 
-export function parseMeta(payload: unknown): MensajeEntrante[] {
-  const salida: MensajeEntrante[] = [];
+function construirStatus(s: Record<string, unknown>): StatusEntrega | undefined {
+  const wamid = str(s.id);
+  const estadoRaw = str(s.status);
+  if (wamid === undefined || estadoRaw === undefined) return undefined;
+  if (!ESTADOS_ENTREGA_VALIDOS.has(estadoRaw)) return undefined; // status desconocido: se ignora
+  const estado = estadoRaw as EstadoEntrega;
+
+  const timestamp = str(s.timestamp);
+  const recipientId = str(s.recipient_id);
+  const errores = estado === 'failed' && esArray(s.errors) ? s.errors : undefined;
+
+  return {
+    wamid,
+    estado,
+    ...(timestamp !== undefined ? { timestamp } : {}),
+    ...(recipientId !== undefined ? { recipientId } : {}),
+    ...(errores !== undefined ? { errores } : {}),
+  };
+}
+
+export function parseMeta(payload: unknown): ResultadoParseMeta {
+  const mensajes: MensajeEntrante[] = [];
+  const statuses: StatusEntrega[] = [];
 
   const root = esRecord(payload) ? payload : undefined;
-  if (root === undefined) return salida;
+  if (root === undefined) return { mensajes, statuses };
 
   const entries = esArray(root.entry) ? root.entry : [];
   for (const entry of entries) {
@@ -164,14 +216,22 @@ export function parseMeta(payload: unknown): MensajeEntrante[] {
       if (!esRecord(change)) continue;
       const value = esRecord(change.value) ? change.value : undefined;
       if (value === undefined) continue;
+
       const messages = esArray(value.messages) ? value.messages : [];
       for (const m of messages) {
         if (!esRecord(m)) continue;
         const msg = construirMensaje(m);
-        if (msg !== undefined) salida.push(msg);
+        if (msg !== undefined) mensajes.push(msg);
+      }
+
+      const statusesValue = esArray(value.statuses) ? value.statuses : [];
+      for (const s of statusesValue) {
+        if (!esRecord(s)) continue;
+        const status = construirStatus(s);
+        if (status !== undefined) statuses.push(status);
       }
     }
   }
 
-  return salida;
+  return { mensajes, statuses };
 }

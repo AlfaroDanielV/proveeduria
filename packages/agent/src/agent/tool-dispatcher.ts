@@ -1,4 +1,6 @@
 import type { ResultadoTool } from '../runtime/types.js';
+import { aprobarGanador } from '../tools/adjudicacion.js';
+import { emitirOc } from '../tools/oc.js';
 import {
   confirmarPedido,
   crearPedido,
@@ -17,6 +19,8 @@ export const TOOLS_FASE_2A: readonly ToolFase2a[] = [
   'enviar_rfq',
   'registrar_cotizacion',
   'generar_comparativo',
+  'aprobar_ganador',
+  'emitir_oc',
 ] as const;
 
 export async function ejecutarToolFase2a(
@@ -36,6 +40,10 @@ export async function ejecutarToolFase2a(
       return registrarCotizacion(call.input, ctx);
     case 'generar_comparativo':
       return generarComparativo(call.input, ctx);
+    case 'aprobar_ganador':
+      return aprobarGanador(call.input, ctx);
+    case 'emitir_oc':
+      return emitirOc(call.input, ctx);
   }
 }
 

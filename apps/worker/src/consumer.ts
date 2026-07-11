@@ -1,14 +1,17 @@
 /**
  * Loop de consumo del worker.
  *
- * Fase 1: `procesarUno` toma un job de la cola, lo pasa al handler y hace ack; ante fallo
- * hace nack para reintento. `correrLoop` repite hasta que no queden jobs o se cancele.
+ * `procesarUno` toma un job de la cola, lo pasa al handler y hace ack; ante fallo del
+ * handler hace nack para reintento (el backoff real vive en `AzureQueueConsumer.nack`,
+ * ver docs/specs/broker-colas.md). `correrLoop` repite hasta que no queden jobs o se
+ * cancele.
  *
- * TODO(Fase 2): antes de `handler.manejar(job)` el loop (o el handler) debe tomar el lock
- * advisory de Postgres por `job.pedidoId` (`pg_advisory_xact_lock`) para garantizar orden
- * por pedido; sin `pedidoId` no hay lock (mensajes aun no ligados a un pedido). El backoff
- * de reintento debe pasar a ser exponencial con jitter y respetar `next_retry_at` /
- * visibility timeout del broker en lugar del reencolado inmediato del InMemoryConsumer.
+ * Resiliencia ante el broker: un `poll()`/`ack()`/`nack()` que lanza (blip transitorio de
+ * Azure) NUNCA debe tumbar el proceso del worker — se reporta como ciclo `error_broker` y
+ * el loop espera y sigue. La reentrega es segura: idempotencia por `processed_at`/`wamid`.
+ *
+ * El lock advisory por `pedido_id` vive en el domain handler (`pg_advisory_xact_lock`);
+ * aqui no se toma ningun lock.
  */
 
 import type { QueueConsumer, Job } from './queue/index.js';
@@ -25,18 +28,27 @@ export interface ProcesarUnoDeps {
 export type ResultadoCiclo =
   | { readonly estado: 'vacio' }
   | { readonly estado: 'procesado'; readonly job: Job }
-  | { readonly estado: 'reintentar'; readonly job: Job; readonly error: unknown };
+  | { readonly estado: 'reintentar'; readonly job: Job; readonly error: unknown }
+  | { readonly estado: 'error_broker'; readonly error: unknown };
 
 /**
  * Procesa a lo sumo un job: poll -> handler -> ack. Si el handler lanza, hace nack y
- * reporta `reintentar` (nunca propaga: el loop decide si continuar). Si la cola esta
- * vacia devuelve `vacio`.
+ * reporta `reintentar`; si el broker lanza (poll/ack/nack), reporta `error_broker`.
+ * Nunca propaga: el loop decide si continuar. Si la cola esta vacia devuelve `vacio`.
  */
 export async function procesarUno(deps: ProcesarUnoDeps): Promise<ResultadoCiclo> {
   const { consumer, handler } = deps;
   const log = deps.log ?? consoleLogSink;
 
-  const job = await consumer.poll();
+  let job: Job | null;
+  try {
+    job = await consumer.poll();
+  } catch (error) {
+    log.info('broker.error_poll', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { estado: 'error_broker', error };
+  }
   if (job === null) {
     return { estado: 'vacio' };
   }
@@ -46,15 +58,26 @@ export async function procesarUno(deps: ProcesarUnoDeps): Promise<ResultadoCiclo
     await consumer.ack(job);
     return { estado: 'procesado', job };
   } catch (error) {
-    // Fallo transitorio: devolvemos el job a la cola. En Fase 2 esto aplica backoff real
-    // (ver TODO de cabecera). Nunca perdemos ni duplicamos el efecto de dominio.
+    // Fallo del handler (o del ack): devolvemos el job a la cola con nack; el backoff
+    // real lo aplica el broker (visibility timeout). Nunca perdemos ni duplicamos el
+    // efecto de dominio: el handler es idempotente por `processed_at`/`wamid`.
     log.info('job.nack', {
       jobId: job.id,
       wamid: job.wamid,
       intento: job.intento,
       error: error instanceof Error ? error.message : String(error),
     });
-    await consumer.nack(job);
+    try {
+      await consumer.nack(job);
+    } catch (errorNack) {
+      // Un nack fallido no es fatal: la visibilidad del broker expira sola y el mensaje
+      // reaparece (at-least-once); solo se registra.
+      log.info('broker.error_nack', {
+        jobId: job.id,
+        wamid: job.wamid,
+        error: errorNack instanceof Error ? errorNack.message : String(errorNack),
+      });
+    }
     return { estado: 'reintentar', job, error };
   }
 }
@@ -89,6 +112,16 @@ export async function correrLoop(deps: CorrerLoopDeps): Promise<number> {
     if (ciclo.estado === 'reintentar') {
       continue;
     }
+    if (ciclo.estado === 'error_broker') {
+      // Blip transitorio del broker: en modo one-shot (stub/tests) se corta; como proceso
+      // real se espera (minimo 1s para no girar en caliente ante una caida sostenida) y
+      // se reintenta el poll.
+      if (detenerAlVaciar) {
+        break;
+      }
+      await esperar(Math.max(esperaVacioMs, 1000), deps.signal);
+      continue;
+    }
     // estado === 'vacio'
     if (detenerAlVaciar) {
       break;
@@ -101,12 +134,21 @@ export async function correrLoop(deps: CorrerLoopDeps): Promise<number> {
   return procesados;
 }
 
+/** Espera `ms` o hasta que el `signal` aborte. Sin timers ni listeners colgados. */
 function esperar(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
-    const t = setTimeout(resolve, ms);
-    signal?.addEventListener('abort', () => {
+    if (signal?.aborted === true) {
+      resolve();
+      return;
+    }
+    const onAbort = (): void => {
       clearTimeout(t);
       resolve();
-    });
+    };
+    const t = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
   });
 }

@@ -198,4 +198,32 @@ export interface UmbralesConfig {
   readonly horasAtascoEnRevision: number;
   /** E13: horas en `aprobado` sin OC confirmada por proveedor antes de recordatorio. */
   readonly horasAtascoAprobado: number;
+  /**
+   * E3: similitud minima (score de `matchFacturaOc`, 0..1) para aceptar una OC como match
+   * unico de una factura. Bajo el umbral (o empate entre candidatas) escala a
+   * `review_queue(factura_sin_oc)`. Default 0.6 (exceptions.md fila E3 y regla general 3).
+   */
+  readonly similitudMinFacturaOc: number;
+}
+
+// ---------------------------------------------------------------------------
+// Extraccion de factura (exceptions.md fila E9): confianza por campo.
+// ---------------------------------------------------------------------------
+
+/** Un campo extraido con su valor (o `null` si no se pudo extraer) y la confianza del OCR/LLM. */
+export interface CampoExtraido<T> {
+  readonly valor: T | null;
+  readonly confianza: number;
+}
+
+/**
+ * Campos de factura con confianza por campo (exceptions.md fila E9: "El extractor entrega
+ * confianza por campo: numero de factura, monto total, fecha, proveedor, y por linea").
+ * Los campos por linea no se modelan aqui (viven en `invoice_items`, fuera de este contrato).
+ */
+export interface CamposFacturaExtraida {
+  readonly numeroFactura: CampoExtraido<string>;
+  readonly montoTotal: CampoExtraido<number>;
+  readonly fecha: CampoExtraido<string>;
+  readonly proveedorNombre: CampoExtraido<string>;
 }

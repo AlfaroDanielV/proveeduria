@@ -44,20 +44,24 @@ Contrato de cada herramienta expuesta al agente Claude. Reglas transversales:
 - **Input**: pedido_id.
 - **Guard**: pedido `en_revision`; si el pedido sigue `cotizando`, primero deben completarse/vencerse las RFQs y ejecutarse la transición `cotizando→en_revision`.
 - **Efecto**: SQL determinista (sin LLM): tabla ítem×proveedor calculada desde `pedido_items`, `quote_requests`, la última `quote_response` completa por proveedor y sus `quote_items`. Incluye precio, cantidad cotizada, disponibilidad, plazo, condiciones, subtotales y faltantes marcados (sin respuesta, sin ítem cotizado, precio/cantidad faltante, cantidad menor a la solicitada o `disponible=false`). Registra `audit_event(generar_comparativo)` y encola `notificacion_interna` por `outbox` con resumen compacto y payload de la tabla para WhatsApp/portal.
-- **No hace**: adjudicar ganador, emitir OC ni persistir un snapshot editable. En Fase 2a el portal puede recalcular la misma vista; si más adelante se requiere evidencia inmutable de una adjudicación, se agregará schema específico antes de cambiar este contrato.
+- **No hace**: adjudicar ganador, emitir OC ni persistir un snapshot editable. En Fase 2a el portal puede recalcular la misma vista. La evidencia inmutable de adjudicación quedó resuelta sin schema nuevo: `aprobar_ganador` guarda el snapshot del comparativo en `approval_events.detalle` (ver su contrato).
 
 ## Adjudicación y OC
 
 ### `aprobar_ganador`
 - **Roles**: admin_materiales, superadmin. Registra `approval_events(ganador)`.
 - **Input**: pedido_id, asignaciones[{supplier_id, pedido_item_ids[]}] — permite división entre proveedores.
-- **Guard**: pedido `en_revision`; cada ítem asignado exactamente una vez; el agente puede **recomendar** pero el input viene de decisión humana explícita.
-- **Efecto**: `en_revision→aprobado`.
+- **Guard**: pedido `en_revision`; cada ítem asignado exactamente una vez (ni sin asignar ni duplicado); cada supplier asignado debe tener `quote_response` completa para los ítems que gana; el agente puede **recomendar** pero el input viene de decisión humana explícita.
+- **Efecto**: `en_revision→aprobado`. **Evidencia**: `approval_events.detalle` guarda el snapshot jsonb del comparativo calculado en esa misma transacción (lo que "vio" el aprobador) + las asignaciones — sin tabla nueva (decisión D5 del plan).
+- **Forma normativa de `detalle`** (la lee `emitir_oc`): `{ "asignaciones": [{ "supplierId", "pedidoItemIds": [], "quoteResponseId" }], "comparativo": <snapshot> }`. `quoteResponseId` es la última respuesta completa del proveedor asignado (la misma que usó el comparativo): fija de forma determinista los precios que `emitir_oc` copiará a `po_items`.
 
 ### `emitir_oc`
 - **Roles**: admin_materiales, superadmin. Registra `approval_events(emision_oc)`.
-- **Efecto**: genera OC(s) con numeración correlativa + PDF, encola envío al proveedor (plantilla `oc_emitida` + `oc_confirmacion_solicitada`), `aprobado→ordenado`.
+- **Efecto**: genera OC(s) con numeración correlativa + PDF, encola envío al proveedor con la plantilla `oc_emitida` (que ya solicita confirmación de recepción y fecha — no existe plantilla `oc_confirmacion_solicitada`; el seguimiento es `oc_confirmacion_recordatorio` vía cron B11), `aprobado→ordenado` en la misma transacción (el envío real es asíncrono vía outbox). El ciclo de estados de la OC vive en `state-machine.md` §Ciclo de la OC.
+- **PDF de la OC** (determinista; bytes en `attachment_blobs`, entrega por link firmado — `outbox-whatsapp.md` §Documentos adjuntos): encabezado Atemporal + número OC + fecha, proyecto, proveedor (nombre y cédula), tabla de ítems (descripción, cantidad, unidad, precio unitario, subtotal), total en CRC, condiciones y plazo de entrega de la cotización ganadora, y referencia al PED de origen.
+- **Fuente de datos**: la última `approval_events(tipo='ganador')` del pedido — su `detalle.asignaciones` (decisión humana registrada) fija proveedores, ítems y `quoteResponseId`; los precios unitarios de `po_items` se copian de los `quote_items` de esa respuesta. Si no existe approval de ganador → error explicable (no se emite "de memoria").
 - **Guard**: nunca auto-invocada por el agente sin instrucción humana en el turno.
+- **Anular OC**: sin tool en Módulo 1 — flujo manual de Gerencia (pregunta abierta de negocio; se especifica antes de implementarse).
 
 ## Recepción
 
@@ -109,6 +113,15 @@ Contrato de cada herramienta expuesta al agente Claude. Reglas transversales:
 
 ### `registrar_retroalimentacion`
 - **Roles**: todos los internos. Paridad con prototipo → tabla `feedback`.
+
+## Acciones web del Centro de Control
+
+Las acciones portal-only (CRUD de proveedores/contactos, resolver `review_queue`, pausa del
+agente, reintentar/cancelar outbox, edición de umbrales) **no son tools del agente**: se
+rigen por `control-center.md` (matriz de permisos y semántica) y `portal-api.md`
+(endpoints). Las acciones web que sí mapean a tools (aprobar lista → `enviar_rfq`,
+adjudicar → `aprobar_ganador`, emitir OC) ejecutan la tool con `Ctx.origen='web'` y canal
+de aprobación `web` — mismo contrato, mismo lock por pedido.
 
 ## Paridad con el prototipo (server.js)
 

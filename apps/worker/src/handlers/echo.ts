@@ -46,8 +46,6 @@ export function crearEchoHandler(log: LogSink = consoleLogSink): JobHandler {
       log.info('job.echo', {
         jobId: job.id,
         wamid: job.wamid,
-        fromPhone: job.fromPhone,
-        tipo: job.tipo,
         intento: job.intento,
         ...(job.pedidoId !== undefined ? { pedidoId: job.pedidoId } : {}),
         // TODO(Fase 2): aqui iria el resultado real del motor de dominio, no un placeholder.

@@ -9,6 +9,8 @@
  * poder testearla sin tocar el entorno real.
  */
 
+import { randomBytes } from 'node:crypto';
+
 export interface Config {
   /** Meta App Secret; clave del HMAC de `X-Hub-Signature-256`. */
   readonly metaAppSecret: string;
@@ -26,6 +28,25 @@ export interface Config {
   readonly queueName: string;
   /** Permite InMemoryQueue de forma explicita (solo dev/test); nunca en prod real. */
   readonly allowInMemoryQueue: boolean;
+  /**
+   * Secreto HS256 de los JWT de sesion del portal (docs/specs/control-center.md
+   * §Autenticacion). Requerido y fallo-cerrado en produccion; en dev/test, si falta, se
+   * genera uno efimero (no sobrevive reinicios) con warning explicito.
+   */
+  readonly portalJwtSecret: string;
+  /**
+   * Origen exacto habilitado para CORS con credenciales del portal (`PORTAL_ORIGIN`).
+   * Si no esta definido, la API no emite headers CORS (solo acceso same-origin).
+   */
+  readonly portalOrigin: string | undefined;
+  /**
+   * Secreto HS256 compartido api/worker para los links firmados de adjuntos
+   * (docs/specs/outbox-whatsapp.md §Documentos adjuntos): el worker firma
+   * `sub=attachmentId` con este mismo secreto al armar el link del header de plantilla, y
+   * `GET /api/attachments/:id?f=<firma>` lo verifica. Mismo patron que `portalJwtSecret`:
+   * fallo-cerrado en produccion; en dev/test, si falta, se genera uno efimero con warning.
+   */
+  readonly attachmentsLinkSecret: string;
 }
 
 const REQUERIDAS = ['META_APP_SECRET', 'META_VERIFY_TOKEN', 'DATABASE_URL'] as const;
@@ -75,6 +96,47 @@ export function cargarConfig(env: NodeJS.ProcessEnv = process.env): Config {
     );
   }
 
+  // PORTAL_JWT_SECRET: fallo-cerrado en produccion (sin secreto no hay JWT verificable).
+  // En dev/test, si falta, se genera un secreto efimero en memoria: las sesiones no
+  // sobreviven un reinicio del proceso, pero el servidor arranca para desarrollo local.
+  let portalJwtSecret: string;
+  if (!estaVacio(env.PORTAL_JWT_SECRET)) {
+    portalJwtSecret = (env.PORTAL_JWT_SECRET as string).trim();
+  } else if (nodeEnv === 'production') {
+    throw new Error(
+      'Config invalida: en produccion se requiere PORTAL_JWT_SECRET (Key Vault en Azure).',
+    );
+  } else {
+    portalJwtSecret = randomBytes(32).toString('base64url');
+    // eslint-disable-next-line no-console
+    console.warn(
+      'PORTAL_JWT_SECRET no definido: usando un secreto efimero generado en memoria. ' +
+        'Las sesiones del portal NO sobreviven un reinicio del proceso. Definilo en el ' +
+        'entorno antes de produccion.',
+    );
+  }
+
+  const portalOrigin = estaVacio(env.PORTAL_ORIGIN) ? undefined : (env.PORTAL_ORIGIN as string).trim();
+
+  // ATTACHMENTS_LINK_SECRET: mismo patron exacto que PORTAL_JWT_SECRET (fallo-cerrado en
+  // produccion; efimero con warning en dev/test).
+  let attachmentsLinkSecret: string;
+  if (!estaVacio(env.ATTACHMENTS_LINK_SECRET)) {
+    attachmentsLinkSecret = (env.ATTACHMENTS_LINK_SECRET as string).trim();
+  } else if (nodeEnv === 'production') {
+    throw new Error(
+      'Config invalida: en produccion se requiere ATTACHMENTS_LINK_SECRET (Key Vault en Azure).',
+    );
+  } else {
+    attachmentsLinkSecret = randomBytes(32).toString('base64url');
+    // eslint-disable-next-line no-console
+    console.warn(
+      'ATTACHMENTS_LINK_SECRET no definido: usando un secreto efimero generado en memoria. ' +
+        'Los links de adjuntos firmados antes de un reinicio del proceso dejan de ser ' +
+        'verificables. Definilo en el entorno antes de produccion.',
+    );
+  }
+
   // Los valores ya se validaron no-vacios en `faltantes`; el `!` es seguro.
   return {
     metaAppSecret: env.META_APP_SECRET!,
@@ -85,5 +147,8 @@ export function cargarConfig(env: NodeJS.ProcessEnv = process.env): Config {
     queueConnection,
     queueName,
     allowInMemoryQueue,
+    portalJwtSecret,
+    portalOrigin,
+    attachmentsLinkSecret,
   };
 }

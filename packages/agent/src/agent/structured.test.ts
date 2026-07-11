@@ -31,9 +31,11 @@ describe('extraerToolCallEstructurado', () => {
   });
 
   it('rechaza tools fuera del whitelist Fase 2a', () => {
+    // registrar_factura es Fase 2b (aun no whitelisted); emitir_oc paso a estar en el
+    // whitelist de Fase 2a, por lo que este caso se reubico a otra tool fuera de alcance.
     expect(extraerToolCallEstructurado({
       tool_call: {
-        name: 'emitir_oc',
+        name: 'registrar_factura',
         input: {},
       },
     })).toBeNull();

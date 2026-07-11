@@ -462,3 +462,303 @@ td.numeric {
     display: grid;
   }
 }
+
+/* --- Centro de Control (React) --------------------------------------------------- */
+
+.shell-nav {
+  display: flex;
+  gap: 8px;
+}
+
+.shell-nav button {
+  background: white;
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+
+.shell-nav button.active,
+.shell-nav button:hover {
+  background: var(--green-soft);
+  border-color: var(--green);
+  color: var(--green);
+}
+
+.topbar .session {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.topbar .session button {
+  min-height: 32px;
+  background: white;
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+
+.shell-body {
+  padding-top: 4px;
+}
+
+.screen {
+  display: grid;
+  gap: 0;
+}
+
+button.secondary {
+  background: white;
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+
+button.secondary:hover {
+  background: #eef1eb;
+}
+
+button.danger {
+  background: var(--red);
+  border-color: var(--red);
+}
+
+button.danger:hover {
+  background: #8f1e18;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.empty-hint {
+  padding: 16px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* Login / cambio de password */
+
+.login-shell {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 20px;
+}
+
+.login-card {
+  display: grid;
+  gap: 14px;
+  width: min(380px, 100%);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  padding: 28px;
+}
+
+.login-card h1 {
+  margin-bottom: 4px;
+}
+
+.form-error {
+  margin: 0;
+  color: var(--red);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* Formularios (proveedores / contactos / revisiones) */
+
+.form-card {
+  display: grid;
+  gap: 14px;
+  max-width: 520px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  padding: 18px;
+  margin: 16px 0;
+}
+
+.form-card.compact {
+  max-width: none;
+  margin: 12px 0 0;
+  box-shadow: none;
+  padding: 14px;
+}
+
+.checkbox-label {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  text-transform: none;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.checkbox-label input {
+  width: auto;
+  min-height: auto;
+}
+
+.form-actions {
+  display: flex;
+  gap: 10px;
+}
+
+textarea {
+  width: 100%;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: white;
+  color: var(--text);
+  padding: 8px 10px;
+  font: inherit;
+  resize: vertical;
+}
+
+.tag-input {
+  display: grid;
+  gap: 8px;
+}
+
+.tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip.tag {
+  gap: 6px;
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+.chip.tag button {
+  min-height: auto;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.detail-readonly {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 14px;
+  margin: 16px 0;
+}
+
+.detail-readonly dt {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.detail-readonly dd {
+  margin: 0;
+}
+
+/* Contactos */
+
+.contacto-fila {
+  display: grid;
+  gap: 6px;
+}
+
+.contacto-edicion {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.contacto-edicion input {
+  flex: 1;
+}
+
+.contacto-acciones {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.contacto-acciones button {
+  min-height: 30px;
+  font-size: 12px;
+  padding: 0 10px;
+}
+
+/* Revisiones */
+
+.revision-fila {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.revision-fila > div {
+  display: grid;
+  gap: 3px;
+}
+
+/* Paginacion */
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 12px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* Dialog */
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(32, 37, 31, 0.45);
+  padding: 20px;
+  z-index: 50;
+}
+
+.dialog {
+  display: grid;
+  gap: 14px;
+  width: min(480px, 100%);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  padding: 20px;
+}
+
+.dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.dialog-close {
+  min-height: 28px;
+  min-width: 28px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 18px;
+  padding: 0;
+}
+
+.dialog-close:hover {
+  background: transparent;
+  color: var(--text);
+}

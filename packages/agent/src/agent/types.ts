@@ -6,7 +6,9 @@ export type ToolFase2a =
   | 'sugerir_proveedores'
   | 'enviar_rfq'
   | 'registrar_cotizacion'
-  | 'generar_comparativo';
+  | 'generar_comparativo'
+  | 'aprobar_ganador'
+  | 'emitir_oc';
 
 export interface ToolCallEstructurado {
   readonly name: ToolFase2a;

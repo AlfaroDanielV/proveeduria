@@ -11,7 +11,9 @@ export function esToolFase2a(name: string): name is ToolFase2a {
     name === 'sugerir_proveedores' ||
     name === 'enviar_rfq' ||
     name === 'registrar_cotizacion' ||
-    name === 'generar_comparativo'
+    name === 'generar_comparativo' ||
+    name === 'aprobar_ganador' ||
+    name === 'emitir_oc'
   );
 }
 

@@ -47,10 +47,6 @@ describeIntegration('worker domain handler con Postgres real', () => {
     await handler.manejar({
       id: `job-${suffix}`,
       wamid,
-      fromPhone: '50688880002',
-      tipo: 'texto',
-      payload: { text: 'structured smoke' },
-      recibidoEn: '2026-07-08T12:00:00.000Z',
       intento: 1,
       pedidoId: 'pedido-smoke',
     });
@@ -90,10 +86,6 @@ describeIntegration('worker domain handler con Postgres real', () => {
     await handler.manejar({
       id: `job-${suffix}`,
       wamid,
-      fromPhone: '+50689999999',
-      tipo: 'texto',
-      payload: { text: 'hola' },
-      recibidoEn: '2026-07-08T12:00:00.000Z',
       intento: 1,
     });
 

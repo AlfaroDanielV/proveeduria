@@ -9,6 +9,12 @@ por `scripts/migrate.mjs` (no ORM, no SQL manual en editores). Reemplaza el fluj
 - `migrations/NNN_nombre.sql` — DDL incremental, numerado (`001_...`, `002_...`).
   Cada archivo corre en **una transaccion** y se registra en `schema_migrations`.
   Nunca editar una migracion ya aplicada; agregar una nueva.
+  **Bloques de numeracion reservados por workstream** (el runner es forward-only y sin
+  checksums: dos ramas creando el mismo `NNN` colisionan en silencio — ver
+  `docs/PLAN_FASE2A_2B_CONTROL_CENTER.md` §F0.3): `006` auth portal (aplicada), `007`
+  outbox productivo (aplicada), `008` agent_control + config E3 (aplicada; conversaciones
+  quedaron sin cambios de schema), `009` guardias OC/equipos (aplicada), `010`
+  attachment_blobs (aplicada), `011+` libre.
 - `seeds/NNN_nombre.sql` — datos base **idempotentes** (`ON CONFLICT DO NOTHING`):
   roles, los 5 usuarios/actores del PDF §4.1, proyectos, proveedores de ejemplo.
 - `scripts/migrate.mjs` — runner (`up` | `status` | `seed`). Lo mantiene el humano.

@@ -3,10 +3,18 @@
 
 name: Build and deploy Node.js app to Azure Web App - proveeduria-webhook
 
+# El prototipo legado (server.js) es referencia de comportamiento, no destino de features
+# nuevas (CLAUDE.md). Este deploy apunta a la Web App VIVA conectada a WhatsApp: solo debe
+# dispararse cuando cambia el propio server.js, nunca por trabajo del monorepo nuevo
+# (apps/*, packages/*, docs/*). Cambios a package.json raiz que afecten al legado se
+# despliegan manualmente con workflow_dispatch.
 on:
   push:
     branches:
       - main
+    paths:
+      - 'server.js'
+      - '.github/workflows/main_proveeduria-webhook.yml'
   workflow_dispatch:
 
 jobs:

@@ -9,6 +9,8 @@ Convenciones: snake_case, PK `id uuid default gen_random_uuid()`, timestamps `cr
 - `users` — id, nombre, telefono_whatsapp (unique, E.164), email, activo.
 - `roles` — catálogo fijo: `superadmin`, `admin_materiales`, `admin_equipos`, `ingeniero`, `bodeguero` (§3.1).
 - `user_roles` — user_id, role_id, opcional project_id (ingeniero/bodeguero pueden estar acotados a proyectos).
+- `user_credentials` — user_id (PK/FK), password_hash (scrypt versionado `scrypt$N$r$p$salt$hash`), must_change_password, activo. Login del Centro de Control (`control-center.md`); separado de `users` porque no todo actor WhatsApp tiene acceso web.
+- `portal_sessions` — user_id, refresh_token_hash (sha256, unique), expires_at, revoked_at, user_agent. Refresh con rotacion; revocable.
 - `dashboard_links` — token hash, project_id, expires_at (24h renovable, §4.5), created_by.
 
 ## Maestros
@@ -25,7 +27,7 @@ Convenciones: snake_case, PK `id uuid default gen_random_uuid()`, timestamps `cr
 - `quote_requests` — pedido_id, supplier_id, enviado_at (via outbox), plazo_at, estado: `enviada|respondida|vencida|declinada`.
 - `quote_responses` — quote_request_id, recibido_at, fuente (`texto|imagen|pdf|audio`), attachment_id, condiciones, plazo_entrega, confianza_extraccion numeric(3,2), estado: `completa|incompleta|descartada`.
 - `quote_items` — quote_response_id, pedido_item_id (nullable si el proveedor cotizó algo no pedido), precio_unitario, cantidad, disponible boolean, notas.
-- **Comparativo de cotizaciones** — no es tabla en Fase 2a: se calcula determinísticamente desde `pedido_items`, `quote_requests`, la última `quote_response` completa por proveedor y sus `quote_items`. El resultado se audita y se puede enviar por `outbox`; snapshots inmutables requerirán migración nueva antes de implementarse.
+- **Comparativo de cotizaciones** — no es tabla: se calcula determinísticamente desde `pedido_items`, `quote_requests`, la última `quote_response` completa por proveedor y sus `quote_items`. El resultado se audita y se puede enviar por `outbox`. La evidencia inmutable de adjudicación es el snapshot jsonb en `approval_events.detalle` que escribe `aprobar_ganador` (decisión D5; sin tabla nueva — solo si el negocio exigiera consultarlo/editarlo se agregaría schema, spec primero).
 
 ## Compra y recepción
 
@@ -43,15 +45,17 @@ Convenciones: snake_case, PK `id uuid default gen_random_uuid()`, timestamps `cr
 ## Equipos de alquiler (§4.4)
 
 - `equipment_rentals` — project_id, supplier_id, descripcion_equipo, cantidad_inicial, cantidad_activa (check ≥ 0), boleta_attachment_id, estado: `activo|cerrado`, abierto_at/cerrado_at.
-- `equipment_movements` — rental_id, tipo: `entrada|devolucion`, cantidad, boleta_attachment_id, registrado_por, at. `cantidad_activa` se recalcula en la misma transacción.
+- `equipment_movements` — rental_id, tipo: `entrada|devolucion`, cantidad, boleta_attachment_id, registrado_por, at. `cantidad_activa` la recalcula un **trigger de DB** sobre el INSERT de movimiento (migración 009: `cantidad_activa = Σ entradas − Σ devoluciones`), con el CHECK ≥ 0 como segunda barrera — no es solo convención de aplicación.
 
 ## Mensajería y operación
 
 - `inbound_messages` — **wamid unique** (clave de idempotencia), from_phone, tipo, payload jsonb, attachment_id, received_at, processed_at, conversation_id.
-- `outbox_messages` — destino, template|texto, payload, estado: `pendiente|enviado|fallido`, wamid_salida, intentos, next_retry_at. Insertado en la misma transacción que el efecto de dominio.
+- `outbox_messages` — destino, template|texto, payload, estado: `pendiente|enviando|enviado|fallido|descartado` (ciclo de vida y claim/lease en `outbox-whatsapp.md`), wamid_salida, intentos, max_intentos, next_retry_at, claimed_at, error_ultimo, attachment_id (documento adjunto, ej. PDF de OC), entrega_estado/`entrega_actualizada_at`/`entrega_error` (statuses de Meta). Insertado en la misma transacción que el efecto de dominio.
 - `conversations` — phone, user_id|supplier_contact_id, contexto jsonb (reemplaza el Map en memoria de server.js:958), last_message_at, ventana_24h_expira_at.
-- `attachments` — blob_path, content_type, sha256, origen (wamid), bytes. Blobs privados; acceso por SAS de corta vida.
+- `attachments` — blob_path, content_type, sha256, origen (wamid), bytes. Blobs privados; acceso por link firmado de corta vida (`outbox-whatsapp.md` §Documentos adjuntos).
+- `attachment_blobs` — attachment_id (PK/FK), bytes bytea (migración 010): almacenamiento en Postgres mientras no hay Azure Blob; `blob_path = 'pg://attachment_blobs/<id>'`. Al migrar a Blob, la tabla se vacía y `blob_path` pasa a `azure://...` sin cambiar el contrato del link.
 - `review_queue` — tipo (`factura_sin_oc|diferencia_monto|nc_ambigua|cotizacion_incompleta|extraccion_baja_confianza|material_no_coincide`), referencia polimórfica (tabla+id), detalle jsonb, estado: `pendiente|resuelta`, resuelta_por/resolucion.
+- `agent_control` — pausas del agente (`control-center.md` §Pausa): alcance `global|telefono|pedido`, referencia, motivo, pausado_por/at, reanudado_por/at (vigente ⟺ `reanudado_at IS NULL`; única global vigente por índice parcial). El worker la consulta antes de delegar al engine.
 - `approval_events` — tipo (`lista_proveedores|ganador|emision_oc|recepcion|nc|cierre`), pedido_id, aprobado_por, canal (`whatsapp|web`), detalle jsonb, at.
 - `audit_events` — **append-only** (sin UPDATE/DELETE por permisos + trigger): actor_user_id|system, accion, entidad, entidad_id, antes/despues jsonb, origen (wamid|web|cron), at. Índice por (entidad, entidad_id) y por pedido_id.
 - `feedback` — paridad con `registrar_retroalimentacion` del prototipo: user_id, tipo (`error|sugerencia`), texto, contexto.
